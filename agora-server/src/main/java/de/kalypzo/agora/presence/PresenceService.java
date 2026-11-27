@@ -31,6 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,8 +55,8 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * Every change is broadcast as {@code PresenceChanged} to all sessions, under the presence lock, so broadcasts and
- * {@link #snapshot()} (the {@code Welcome}) are totally ordered. Lane handlers never block: the kick wait is a
- * future. Register with {@link #install}.
+ * {@link #sendSnapshot} (builds and queues the {@code Welcome}) are totally ordered per session. Lane handlers never
+ * block: the kick wait is a future. Register with {@link #install}.
  */
 public final class PresenceService implements PresenceSnapshot, HelloListener, NodeMessageListener {
 
@@ -388,10 +389,25 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
     @Override
     public List<PresenceEntry> snapshot() {
         synchronized (lock) {
-            List<PresenceEntry> out = new ArrayList<>(entries.size());
-            for (Slot s : entries.values()) out.add(s.entry());
-            return out;
+            return snapshotLocked();
         }
+    }
+
+    /**
+     * Builds the snapshot and runs {@code sender} (which queues the Welcome) under the presence lock, so the Welcome
+     * is ordered before every later broadcast to that session (A-11). {@code sender} must only queue.
+     */
+    @Override
+    public void sendSnapshot(Consumer<List<PresenceEntry>> sender) {
+        synchronized (lock) {
+            sender.accept(snapshotLocked());
+        }
+    }
+
+    private List<PresenceEntry> snapshotLocked() {
+        List<PresenceEntry> out = new ArrayList<>(entries.size());
+        for (Slot s : entries.values()) out.add(s.entry());
+        return out;
     }
 
     /** The current entry of {@code player}, if online (A-12: delivery and locate routing). */

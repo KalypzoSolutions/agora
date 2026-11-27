@@ -43,10 +43,13 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Visibility before {@code Welcome}: a session is visible to broadcasts ({@code registry.all()}) from its
  * registration on, which happens in the same lane task right before its Hello listeners and Welcome. A broadcast
- * (PresenceChanged, DocChanged) can therefore reach a node shortly before its Welcome. This is harmless: the Welcome
- * snapshot is taken when it is sent, so it already contains every change broadcast before; a node applies
- * PresenceChanged as upsert/remove (idempotent) and replaces its whole copy on Welcome. For PAPER nodes, messages
- * before the delayed Welcome are intended (E11).
+ * (PresenceChanged, DocChanged) can therefore reach a node shortly before its Welcome. The Welcome snapshot is built
+ * and queued in one step under the presence lock ({@link PresenceSnapshot#sendSnapshot}), the same lock under which
+ * PresenceChanged is broadcast. So every presence change is either already in the Welcome or queued after it; a
+ * change broadcast before is contained in the snapshot as well (a node applies PresenceChanged as upsert/remove,
+ * idempotent, and replaces its whole copy on Welcome). Taking the snapshot first and sending it later would let a
+ * change slip in between and be wiped by the Welcome for good (A-11). For PAPER nodes, messages before the delayed
+ * Welcome are intended (E11).
  *
  * <p>Pending PAPER welcomes are released by {@link #tick()}, which runs on the injected scheduler when the warm-up
  * ends and can be called directly by tests with a fake {@link Clock} (R24).
@@ -224,8 +227,9 @@ public final class NodeStream implements ConnectHandler {
     }
 
     private void sendWelcome(NodeSession s) {
-        s.send(ServiceMessage.newBuilder()
-                .setWelcome(Welcome.newBuilder().addAllPresence(presence.snapshot()))
-                .build());
+        // Built and queued under the presence lock (A-11): no broadcast can overtake the Welcome.
+        presence.sendSnapshot(entries -> s.send(ServiceMessage.newBuilder()
+                .setWelcome(Welcome.newBuilder().addAllPresence(entries))
+                .build()));
     }
 }

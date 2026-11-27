@@ -104,6 +104,12 @@ class PresenceServiceTest {
     }
 
     void start(Duration kickTimeout) throws Exception {
+        start(kickTimeout, null);
+    }
+
+    /** {@code welcomeHook} (if set) wraps the presence handed to NodeStream (A-11 Welcome ordering test). */
+    void start(Duration kickTimeout, java.util.function.Function<PresenceService, PresenceSnapshot> welcomeHook)
+            throws Exception {
         Path tokens = dir.resolve("tokens");
         Files.writeString(tokens, "paper-1=tok-paper\nproxy-01=tok-p1\nproxy-02=tok-p2\n");
         presence = new PresenceService(registry, clock, kickTimeout, recorder);
@@ -117,7 +123,8 @@ class PresenceServiceTest {
         });
         var service = new de.kalypzo.agora.service.AgoraService();
         PresenceEndpoints.register(service, presence, registry);
-        service.onConnect(new NodeStream(registry, dispatcher, presence, clock, scheduler, Duration.ZERO,
+        PresenceSnapshot forWelcome = welcomeHook == null ? presence : welcomeHook.apply(presence);
+        service.onConnect(new NodeStream(registry, dispatcher, forWelcome, clock, scheduler, Duration.ZERO,
                 NodeSession.DEFAULT_QUEUE_LIMIT));
         String name = "presence-" + System.nanoTime();
         server = InProcessServerBuilder.forName(name)
@@ -514,6 +521,64 @@ class PresenceServiceTest {
                 .isInstanceOfSatisfying(StatusRuntimeException.class,
                         e -> assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.FAILED_PRECONDITION));
         assertThat(presence.snapshot()).isEmpty();
+    }
+
+    @Test
+    void broadcastDuringWelcomeIsNotLost() throws Exception {
+        // A-11: a change broadcast while the Welcome is being built must not reach the node before that Welcome
+        // (the node replaces its whole copy on Welcome, so the change would be lost for good).
+        java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean();
+        CompletableFuture<ClaimPresenceResponse> claimed = new CompletableFuture<>();
+        Runnable between = () -> {
+            if (!armed.compareAndSet(true, false)) return;
+            claimAsync("proxy-01", "tok-p1", entry(STEVE, "Steve")).whenComplete((r, e) -> {
+                if (e != null) claimed.completeExceptionally(e);
+                else claimed.complete(r);
+            });
+            try {
+                claimed.get(500, TimeUnit.MILLISECONDS); // completes here only if the broadcast is not held back
+            } catch (Exception ignored) {
+                // held back by the presence lock: the Welcome goes first
+            }
+        };
+        start(PresenceService.DEFAULT_KICK_TIMEOUT, real -> new PresenceSnapshot() {
+            @Override
+            public List<PresenceEntry> snapshot() {
+                List<PresenceEntry> s = real.snapshot();
+                between.run();
+                return s;
+            }
+
+            @Override
+            public void sendSnapshot(java.util.function.Consumer<List<PresenceEntry>> sender) {
+                real.sendSnapshot(entries -> {
+                    between.run(); // between building the snapshot and queueing the Welcome
+                    sender.accept(entries);
+                });
+            }
+        });
+        connect("proxy-01", "tok-p1", NodeKind.VELOCITY);
+        armed.set(true);
+        Client paper = connect("paper-1", "tok-paper", NodeKind.PAPER, false);
+        assertThat(claimed.get(5, TimeUnit.SECONDS).getAccepted()).isTrue();
+
+        // Apply what the node receives, in order, like AgoraBackend: Welcome replaces, PresenceChanged upserts.
+        Map<String, PresenceEntry> copy = new java.util.LinkedHashMap<>();
+        boolean welcomed = false;
+        boolean upserted = false;
+        while (!welcomed || !upserted) {
+            ServiceMessage m = paper.next();
+            if (m.hasWelcome()) {
+                welcomed = true;
+                copy.clear();
+                m.getWelcome().getPresenceList().forEach(e -> copy.put(e.getPlayer(), e));
+            } else if (m.hasPresenceChanged() && m.getPresenceChanged().hasUpsert()) {
+                upserted = true;
+                PresenceEntry e = m.getPresenceChanged().getUpsert();
+                copy.put(e.getPlayer(), e);
+            }
+        }
+        assertThat(copy).containsKey(STEVE);
     }
 
     // ---------- helpers ----------
