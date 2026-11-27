@@ -149,4 +149,22 @@ class AuditPartitionsTest {
             pool.shutdownNow();
         }
     }
+
+    @Test
+    void waitForAdvisoryLockEndsAtLockTimeout() throws Exception {
+        AuditPartitions p = new AuditPartitions(ds, at("2026-11-27T12:00:00Z"), Duration.ofMillis(300));
+        try (Connection holder = ds.getConnection(); var st = holder.createStatement()) {
+            holder.setAutoCommit(false);
+            st.execute("SELECT pg_advisory_xact_lock(" + 0x70616e5f61756431L + ")");
+            long t0 = System.nanoTime();
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> p.ensure(2))
+                    .isInstanceOf(IllegalStateException.class);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> p.dropExpired(Duration.ofDays(14)))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofSeconds(5));
+            holder.rollback();
+        }
+        p.ensure(2); // lock free again
+        assertThat(partitions()).hasSize(3);
+    }
 }

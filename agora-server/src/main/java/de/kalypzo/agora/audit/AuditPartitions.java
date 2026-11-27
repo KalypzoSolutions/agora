@@ -29,9 +29,25 @@ public final class AuditPartitions {
     private final DataSource ds;
     private final Clock clock;
 
+    /** Upper bound for waiting on the advisory lock (no thread waits without a deadline). */
+    public static final Duration LOCK_TIMEOUT = Duration.ofSeconds(10);
+
+    private final Duration lockTimeout;
+
     public AuditPartitions(DataSource ds, Clock clock) {
+        this(ds, clock, LOCK_TIMEOUT);
+    }
+
+    public AuditPartitions(DataSource ds, Clock clock, Duration lockTimeout) {
         this.ds = ds;
         this.clock = clock;
+        this.lockTimeout = lockTimeout;
+    }
+
+    /** Must run before {@code pg_advisory_xact_lock}: lock_timeout also bounds the advisory-lock wait. */
+    private void lock(Statement st) throws SQLException {
+        st.execute("SET LOCAL lock_timeout = '" + Math.max(1, lockTimeout.toMillis()) + "ms'");
+        st.execute("SELECT pg_advisory_xact_lock(" + LOCK_KEY + ")");
     }
 
     /** Creates the partitions for today ... today + {@code daysAhead} (UTC) that are missing. */
@@ -39,7 +55,7 @@ public final class AuditPartitions {
         LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
             c.setAutoCommit(false);
-            st.execute("SELECT pg_advisory_xact_lock(" + LOCK_KEY + ")");
+            lock(st);
             for (int i = 0; i <= daysAhead; i++) {
                 LocalDate day = today.plusDays(i);
                 st.execute("CREATE TABLE IF NOT EXISTS " + PREFIX + DAY.format(day)
@@ -57,8 +73,7 @@ public final class AuditPartitions {
         Instant cutoff = clock.instant().minus(retention);
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
             c.setAutoCommit(false);
-            st.execute("SELECT pg_advisory_xact_lock(" + LOCK_KEY + ")");
-            st.execute("SET LOCAL lock_timeout = '10s'");
+            lock(st);
             for (String name : partitionNames(st)) {
                 LocalDate day;
                 try {
