@@ -145,6 +145,41 @@ class IndexServiceTest {
     }
 
     @Test
+    void uniqueAppliesOnlyToSetValues() throws Exception {
+        // R43: documents without the field never collide, even if the field has a default
+        exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{}'), ('lobby:clans','b','{}')");
+        FieldSpec tag = field("lobby", "tag", ScalarType.STRING, Value.newBuilder().setStringValue("").build());
+        assertThat(name(service.declare(store("lobby:clans", tag, true)))).isEqualTo("pantheon_doc_lobby_clans_tag");
+        assertThat(one("SELECT indexdef FROM pg_indexes WHERE indexname = 'pantheon_doc_lobby_clans_tag'"))
+                .doesNotContainIgnoringCase("COALESCE").containsIgnoringCase("IS NOT NULL");
+
+        exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','c','{}')");
+        exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','d','{\"tag\":\"\"}')"); // explicit default
+        exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','e','{\"tag\":\"x\"}')");
+        assertThatThrownBy(() -> exec("INSERT INTO pantheon_doc(store, id, data) "
+                + "VALUES ('lobby:clans','f','{\"tag\":\"x\"}')")).hasMessageContaining("duplicate key");
+        assertThatThrownBy(() -> exec("INSERT INTO pantheon_doc(store, id, data) "
+                + "VALUES ('lobby:clans','g','{\"tag\":\"\"}')")).hasMessageContaining("duplicate key");
+    }
+
+    @Test
+    void oldCoalesceUniqueIndexIsRebuilt() throws Exception {
+        // an index built before R43 (with COALESCE over the default) gets the new definition (R40)
+        String old = "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS pantheon_doc_lobby_clans_tag ON pantheon_doc "
+                + "((COALESCE((data->>'tag'), '') COLLATE \"C\")) WHERE store = 'lobby:clans'";
+        exec(old);
+        exec("INSERT INTO pantheon_index (name, definition, status) VALUES ('pantheon_doc_lobby_clans_tag', '"
+                + old.replace("'", "''") + "', 'ready')");
+        FieldSpec tag = field("lobby", "tag", ScalarType.STRING, Value.newBuilder().setStringValue("").build());
+
+        name(service.declare(store("lobby:clans", tag, true)));
+
+        assertThat(one("SELECT indexdef FROM pg_indexes WHERE indexname = 'pantheon_doc_lobby_clans_tag'"))
+                .doesNotContainIgnoringCase("COALESCE");
+        exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{}'), ('lobby:clans','b','{}')");
+    }
+
+    @Test
     void failedIndexIsRetriedAfterFix() throws Exception {
         exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{\"owner\":\"x\"}'),"
                 + "('lobby:clans','b','{\"owner\":\"x\"}')");

@@ -23,7 +23,8 @@ import org.slf4j.LoggerFactory;
  * ({@code pending} -> {@code ready} | {@code failed}). A failed index is dropped and retried on the next declaration
  * (E21); an index that is {@code ready} is not touched. Concurrent declarations of one name share a future.
  *
- * <p>The index expression is {@link FieldExpr#read} with no alias, textually the same as in queries (R4).
+ * <p>The index expression is {@link FieldExpr#read} with no alias, textually the same as in queries (R4); unique
+ * indexes leave out the default (R43).
  */
 public final class IndexService {
 
@@ -80,10 +81,15 @@ public final class IndexService {
     /**
      * The index covers the ranking query {@code ORDER BY <expr> DESC NULLS LAST, <tie-break> ASC} (R39): the tie-break
      * is {@code id COLLATE "C"} for stores and {@code player} for players. ASC sorts are not index-backed. A unique
-     * index covers the expression alone (a tie-break column would make every entry unique).
+     * index covers the raw expression alone (a tie-break column would make every entry unique), without the default
+     * and only where the field is present (R43). A changed definition rebuilds the index (R40).
      */
     static String definition(String name, IndexDeclaration decl) {
-        String expr = FieldExpr.read("", decl.getField()).sql();
+        // R43: a unique index covers only explicitly set values: the raw read without the default's COALESCE,
+        // partial on "field present", so rows without the field never collide.
+        String expr = decl.getUnique()
+                ? FieldExpr.read("", decl.getField().toBuilder().clearDefaultValue().build()).sql()
+                : FieldExpr.read("", decl.getField()).sql();
         String table;
         String tieBreak;
         String predicate;
@@ -99,6 +105,9 @@ public final class IndexService {
                 predicate = "store = " + SqlLiteral.store(decl.getTarget().getStore());
             }
             default -> throw new IllegalArgumentException("index has no target");
+        }
+        if (decl.getUnique()) {
+            predicate += " AND (data->'" + SqlLiteral.fieldName(decl.getField().getName()) + "') IS NOT NULL";
         }
         String columns = decl.getUnique() ? "((" + expr + "))" : "((" + expr + ") DESC NULLS LAST, " + tieBreak + ")";
         return "CREATE " + (decl.getUnique() ? "UNIQUE " : "") + "INDEX CONCURRENTLY IF NOT EXISTS " + name + " ON "
