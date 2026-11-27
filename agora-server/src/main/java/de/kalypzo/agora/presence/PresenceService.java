@@ -75,7 +75,7 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
     private final NodeRegistry registry;
     private final Clock clock;
     private final Duration kickTimeout;
-    private final PresenceEvents events;
+    private volatile PresenceEvents events;
     private final Object lock = new Object();
     private final Map<UUID, Slot> entries = new LinkedHashMap<>(); // guarded by lock
     private final ConcurrentHashMap<UUID, CompletableFuture<?>> chains = new ConcurrentHashMap<>();
@@ -95,6 +95,27 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
 
     public PresenceService(NodeRegistry registry) {
         this(registry, Clock.systemUTC(), DEFAULT_KICK_TIMEOUT, PresenceEvents.NOOP);
+    }
+
+    /**
+     * Adds a listener for real presence events next to the existing one (A-19: the audit is wired after the
+     * database is open, the service is created before). Call before the server starts.
+     */
+    public void addEvents(PresenceEvents extra) {
+        PresenceEvents first = this.events;
+        this.events = new PresenceEvents() {
+            @Override
+            public void switched(PresenceEntry entry, String previousServer) {
+                first.switched(entry, previousServer);
+                extra.switched(entry, previousServer);
+            }
+
+            @Override
+            public void removed(PresenceEntry entry, RemovalReason reason) {
+                first.removed(entry, reason);
+                extra.removed(entry, reason);
+            }
+        };
     }
 
     /** Subscribes to the node messages (Hello, Heartbeat, KickResult, PlayerSwitched, PlayerLeft) and node-gone. */

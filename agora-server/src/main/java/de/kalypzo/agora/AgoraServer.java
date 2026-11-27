@@ -17,7 +17,9 @@ import de.kalypzo.agora.grpc.PresenceEndpoints;
 import de.kalypzo.agora.holder.HolderRegistry;
 import de.kalypzo.agora.audit.AuditIngest;
 import de.kalypzo.agora.audit.AuditPartitions;
+import de.kalypzo.agora.audit.AuditSink;
 import de.kalypzo.agora.audit.AuditStore;
+import de.kalypzo.agora.audit.SessionAuditor;
 import de.kalypzo.agora.audit.TimelineService;
 import de.kalypzo.agora.grpc.AuditEndpoints;
 import de.kalypzo.agora.jobs.AuditPartitionJob;
@@ -63,6 +65,8 @@ public final class AgoraServer {
     private final NodeRegistry nodes;
     private final NodeMessageDispatcher nodeMessages;
     private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService auditScheduler;
+    private final AuditSink auditSink;
     private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
 
     private AgoraServer(
@@ -74,7 +78,9 @@ public final class AgoraServer {
             IndexService indexes,
             NodeRegistry nodes,
             NodeMessageDispatcher nodeMessages,
-            ScheduledExecutorService scheduler) {
+            ScheduledExecutorService scheduler,
+            ScheduledExecutorService auditScheduler,
+            AuditSink auditSink) {
         this.config = config;
         this.dataSource = dataSource;
         this.service = service;
@@ -84,6 +90,8 @@ public final class AgoraServer {
         this.nodes = nodes;
         this.nodeMessages = nodeMessages;
         this.scheduler = scheduler;
+        this.auditScheduler = auditScheduler;
+        this.auditSink = auditSink;
     }
 
     /**
@@ -185,6 +193,13 @@ public final class AgoraServer {
             t.setDaemon(true);
             return t;
         });
+        // E31: its own thread, so a slow Postgres write never delays the other jobs.
+        ScheduledExecutorService auditScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "agora-audit-sink");
+            t.setDaemon(true);
+            return t;
+        });
+        AuditSink auditSink = null;
         try {
             Migrations.migrate(ds);
             // E39: the partitions exist before the server accepts AppendAudit and before health is SERVING.
@@ -195,6 +210,13 @@ public final class AgoraServer {
             IndexService indexes = new IndexService(ds);
             DataEndpoints.registerIndexes(service, indexes);
             AuditStore auditStore = new AuditStore(ds);
+            auditSink = new AuditSink(auditStore, auditScheduler);
+            // A-19: join/switch/quit from the real presence events (the partitions exist, E39).
+            if (presence instanceof PresenceService ps) {
+                ps.addEvents(new SessionAuditor(auditSink, Clock.systemUTC()));
+            } else {
+                LOG.warn("The presence is no PresenceService: no session audit entries");
+            }
             AuditEndpoints.register(service, new AuditIngest(auditStore, Clock.systemUTC()));
             AuditEndpoints.timeline(service, new TimelineService(auditStore, ds, Clock.systemUTC()));
             service.onConnect(new NodeStream(nodes, nodeMessages, presence, Clock.systemUTC(),
@@ -212,13 +234,18 @@ public final class AgoraServer {
             health.setStatus("", ServingStatus.SERVING);
             health.setStatus("agora.v1.Agora", ServingStatus.SERVING);
             LOG.info("Agora listening on port {}", server.getPort());
-            return new AgoraServer(config, ds, service, health, server, indexes, nodes, nodeMessages, scheduler);
+            return new AgoraServer(config, ds, service, health, server, indexes, nodes, nodeMessages, scheduler,
+                    auditScheduler, auditSink);
         } catch (IOException e) {
             scheduler.shutdownNow();
+            if (auditSink != null) auditSink.close();
+            auditScheduler.shutdownNow();
             ds.close();
             throw new UncheckedIOException(e);
         } catch (RuntimeException e) {
             scheduler.shutdownNow();
+            if (auditSink != null) auditSink.close();
+            auditScheduler.shutdownNow();
             ds.close();
             throw e;
         }
@@ -301,6 +328,8 @@ public final class AgoraServer {
             // Wait (bounded) for queued lane tasks before the pool they may use is closed.
             nodes.close(Duration.ofSeconds(5));
             scheduler.shutdownNow();
+            auditSink.close(); // flush the session entries before the pool closes
+            auditScheduler.shutdownNow();
             indexes.close();
             dataSource.close();
         }
