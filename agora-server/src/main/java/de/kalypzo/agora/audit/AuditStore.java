@@ -58,7 +58,11 @@ public class AuditStore {
                 ps.executeBatch();
                 c.commit();
             } catch (SQLException | RuntimeException ex) {
-                c.rollback();
+                try {
+                    c.rollback();
+                } catch (SQLException rb) {
+                    ex.addSuppressed(rb);
+                }
                 throw ex;
             }
         }

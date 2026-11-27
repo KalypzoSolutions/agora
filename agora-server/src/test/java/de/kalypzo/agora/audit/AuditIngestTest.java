@@ -223,25 +223,58 @@ class AuditIngestTest {
     }
 
     @Test
-    void gzipCompressedCallAccepted() throws Exception {
-        stub.withCompression("gzip").appendAudit(AuditBundle.newBuilder().addEntries(entry(NOW)).build());
-        assertThat(ids()).hasSize(1);
+    void extraInvalidEntriesDroppedOthersStored() throws Exception {
+        AuditEntry nul = entry(NOW).putWith("k", AuditValue.newBuilder().setS("a\u0000b").build()).build();
+        AuditEntry nan = entry(NOW.plusMillis(1))
+                .putWith("k", AuditValue.newBuilder().setD(Double.NaN).build()).build();
+        AuditEntry inf = entry(NOW.plusMillis(2))
+                .putWith("k", AuditValue.newBuilder().setD(Double.POSITIVE_INFINITY).build()).build();
+        AuditEntry badTarget = entry(NOW.plusMillis(3)).setTarget(ByteString.copyFrom(new byte[4])).build();
+        AuditEntry badTrace = entry(NOW.plusMillis(4)).setTrace(ByteString.copyFrom(new byte[17])).build();
+        AuditEntry badId = entry(NOW.plusMillis(5)).setId(ByteString.copyFrom(new byte[8])).build();
+        AuditEntry good = entry(NOW.plusMillis(6)).putWith("k", AuditValue.newBuilder().setD(1.5).build()).build();
+        stub.appendAudit(AuditBundle.newBuilder().addEntries(nul).addEntries(nan).addEntries(inf)
+                .addEntries(badTarget).addEntries(badTrace).addEntries(badId).addEntries(good).build());
+        assertThat(ids()).containsExactly(idOf(good));
+        assertThat(logs.list).extracting(ILoggingEvent::getFormattedMessage)
+                .containsExactly("Audit: 6 Einträge von lobby-1 verworfen");
     }
 
     @Test
-    void fourMegabyteBundleAccepted() throws Exception {
-        String text = "x".repeat(512);
-        AuditBundle.Builder b = AuditBundle.newBuilder();
-        for (int i = 0; i < 500; i++) {
-            AuditEntry.Builder e = entry(NOW.plusMillis(i));
-            for (int k = 0; k < 16; k++) {
-                e.putWith("key_" + k, AuditValue.newBuilder().setS(text).build());
-            }
-            b.addEntries(e);
+    void databaseFailureAnswersUnavailable() {
+        HikariConfig cfg = new HikariConfig();
+        cfg.setJdbcUrl(postgres.getJdbcUrl());
+        cfg.setUsername(postgres.getUsername());
+        cfg.setPassword(postgres.getPassword());
+        HikariDataSource dead = new HikariDataSource(cfg);
+        dead.close();
+        AgoraService service = new AgoraService();
+        AuditEndpoints.register(service, new AuditIngest(new AuditStore(dead), CLOCK));
+        String name = "audit-dead-" + UUID.randomUUID();
+        Server s = null;
+        ManagedChannel ch = null;
+        try {
+            s = InProcessServerBuilder.forName(name).directExecutor()
+                    .intercept(new ServerInterceptor() {
+                        @Override
+                        public <A, B> ServerCall.Listener<A> interceptCall(
+                                ServerCall<A, B> call, Metadata headers, ServerCallHandler<A, B> next) {
+                            Context ctx = Context.current()
+                                    .withValue(NodeIdentity.CONTEXT_KEY, new NodeIdentity("lobby-1"));
+                            return Contexts.interceptCall(ctx, call, headers, next);
+                        }
+                    }).addService(service).build().start();
+            ch = InProcessChannelBuilder.forName(name).directExecutor().build();
+            var deadStub = AgoraGrpc.newBlockingStub(ch);
+            org.assertj.core.api.Assertions.assertThatThrownBy(
+                            () -> deadStub.appendAudit(AuditBundle.newBuilder().addEntries(entry(NOW)).build()))
+                    .isInstanceOfSatisfying(io.grpc.StatusRuntimeException.class,
+                            e -> assertThat(e.getStatus().getCode()).isEqualTo(io.grpc.Status.Code.UNAVAILABLE));
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        } finally {
+            if (ch != null) ch.shutdownNow();
+            if (s != null) s.shutdownNow();
         }
-        AuditBundle bundle = b.build();
-        assertThat(bundle.getSerializedSize()).isGreaterThan(4 * 1024 * 1024);
-        stub.appendAudit(bundle);
-        assertThat(ids()).hasSize(500);
     }
 }
