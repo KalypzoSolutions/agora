@@ -15,6 +15,8 @@ import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
 import de.kalypzo.agora.grpc.PresenceEndpoints;
 import de.kalypzo.agora.holder.HolderRegistry;
+import de.kalypzo.agora.audit.AuditPartitions;
+import de.kalypzo.agora.jobs.AuditPartitionJob;
 import de.kalypzo.agora.jobs.ExpireJob;
 import de.kalypzo.agora.jobs.IdempotencyCleanupJob;
 import de.kalypzo.agora.node.NodeMessageDispatcher;
@@ -178,6 +180,8 @@ public final class AgoraServer {
         });
         try {
             Migrations.migrate(ds);
+            // E39: the partitions exist before the server accepts AppendAudit and before health is SERVING.
+            scheduleAuditPartitions(scheduler, ds);
             scheduleJobs(scheduler, ds, changes);
             DataEndpoints.register(service, new ReadService(ds, holders));
             DataEndpoints.registerWrites(service, new WriteService(ds, changes));
@@ -207,6 +211,13 @@ public final class AgoraServer {
             ds.close();
             throw e;
         }
+    }
+
+    /** Runs the audit partition job once now (a failure aborts the start) and then every 24 h (A-16, E39). */
+    static void scheduleAuditPartitions(ScheduledExecutorService scheduler, javax.sql.DataSource ds) {
+        AuditPartitionJob job = new AuditPartitionJob(new AuditPartitions(ds, Clock.systemUTC()));
+        job.run();
+        scheduleLogged(scheduler, job, AuditPartitionJob.INTERVAL, "audit partitions");
     }
 
     /** Background jobs on the scheduler (A-13) and the sweep of orphaned holder entries (A-10); failures are logged. */
