@@ -373,6 +373,14 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
         }
     }
 
+    /** The current entry of {@code player}, if online (A-12: delivery and locate routing). */
+    public Optional<PresenceEntry> entry(UUID player) {
+        synchronized (lock) {
+            Slot s = entries.get(player);
+            return s == null ? Optional.empty() : Optional.of(s.entry());
+        }
+    }
+
     /** Completes once every claim/switch/left queued so far for {@code player} has run (tests, diagnostics). */
     public CompletableFuture<Void> barrier(UUID player) {
         CompletableFuture<?> tail = chains.get(player);

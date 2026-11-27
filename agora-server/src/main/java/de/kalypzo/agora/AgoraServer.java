@@ -9,6 +9,8 @@ import de.kalypzo.agora.data.HolderSink;
 import de.kalypzo.agora.data.ReadService;
 import de.kalypzo.agora.data.WriteService;
 import de.kalypzo.agora.db.Database;
+import de.kalypzo.agora.delivery.DeliveryRouter;
+import de.kalypzo.agora.locate.LocateService;
 import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
 import de.kalypzo.agora.grpc.PresenceEndpoints;
@@ -78,15 +80,15 @@ public final class AgoraServer {
     }
 
     /**
-     * Default wiring: presence (A-11) and the holder registry (A-10), which receives the LoadPlayer claims, the stream
+     * Default wiring: presence (A-11) with delivery and locate (A-12, {@link #wirePresence}), and the holder
+     * registry (A-10), which receives the LoadPlayer claims, the stream
      * messages and node-gone, and routes every committed change as {@code DocChanged} to the holders and watchers.
      */
     public static AgoraServer start(AgoraConfig config, AgoraService service) {
         NodeRegistry nodes = new NodeRegistry();
         NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
         PresenceService presence = new PresenceService(nodes);
-        presence.install(nodeMessages);
-        PresenceEndpoints.register(service, presence, nodes);
+        wirePresence(service, presence, nodes, nodeMessages);
         HolderRegistry holders = new HolderRegistry(nodes);
         holders.install(nodeMessages);
         return start(config, service, holders, nodes, nodeMessages, presence, holders);
@@ -95,14 +97,13 @@ public final class AgoraServer {
     /**
      * {@code holders} additionally receives the LoadPlayer claims; a {@link HolderRegistry} of its own is installed
      * as well and routes the changes (A-10). Wires the presence (A-11): {@code ClaimPresence}, the stream handlers
-     * and the {@code Welcome} snapshot.
+     * and the {@code Welcome} snapshot, and delivery and locate (A-12, {@link #wirePresence}).
      */
     public static AgoraServer start(AgoraConfig config, AgoraService service, HolderSink holders) {
         NodeRegistry nodes = new NodeRegistry();
         NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
         PresenceService presence = new PresenceService(nodes);
-        presence.install(nodeMessages);
-        PresenceEndpoints.register(service, presence, nodes);
+        wirePresence(service, presence, nodes, nodeMessages);
         return start(config, service, holders, nodes, nodeMessages, presence);
     }
 
@@ -112,7 +113,8 @@ public final class AgoraServer {
      * {@code Welcome} snapshot (A-11). This overload does not wire the presence handlers: a caller passing a
      * {@code PresenceService} also calls {@code presence.install(nodeMessages)} and
      * {@code PresenceEndpoints.register(service, presence, nodes)}, otherwise ClaimPresence stays UNIMPLEMENTED (see
-     * {@link #start(AgoraConfig, AgoraService, HolderSink)}).
+     * {@link #start(AgoraConfig, AgoraService, HolderSink)}); {@link #wirePresence} does both plus delivery and locate
+     * (A-12) in one call.
      *
      * <p>Changes are always routed (A-10): if {@code holders} is a {@link HolderRegistry} it is installed on
      * {@code nodeMessages} (idempotent) and used as publisher; otherwise a new {@code HolderRegistry} on {@code nodes}
@@ -132,6 +134,21 @@ public final class AgoraServer {
             holders.addPlayerHolder(nodeId, player);
         };
         return start(config, service, sink, nodes, nodeMessages, presence, registry);
+    }
+
+    /**
+     * Wires everything that hangs off the presence (call before the server starts, once per service): the presence
+     * handlers on {@code nodeMessages} and {@code ClaimPresence} (A-11), the {@link DeliveryRouter} for
+     * {@code SendDelivery} and the {@link LocateService} for {@code Locate}/{@code LocationReply} (A-12, R5).
+     */
+    public static void wirePresence(
+            AgoraService service, PresenceService presence, NodeRegistry nodes, NodeMessageDispatcher nodeMessages) {
+        presence.install(nodeMessages);
+        PresenceEndpoints.register(service, presence, nodes);
+        new DeliveryRouter(nodes, presence).install(nodeMessages);
+        LocateService locate = new LocateService(nodes, presence);
+        locate.install(nodeMessages);
+        locate.register(service);
     }
 
     /** As above; {@code changes} receives every committed write after its commit (A-10 routes it to the holders). */

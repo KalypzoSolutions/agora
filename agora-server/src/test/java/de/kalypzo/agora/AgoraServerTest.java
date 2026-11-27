@@ -33,7 +33,7 @@ class AgoraServerTest {
     @TempDir Path dir;
 
     @Test
-    void healthServingWithoutAuthAndRpcsUnimplemented() throws Exception {
+    void healthServingWithoutAuthAndRpcsWired() throws Exception {
         try (PostgreSQLContainer pg = new PostgreSQLContainer("postgres:17-alpine")) {
             pg.start();
             Path tokens = dir.resolve("tokens");
@@ -48,12 +48,9 @@ class AgoraServerTest {
                 md.put(Metadata.Key.of("x-agora-node", Metadata.ASCII_STRING_MARSHALLER), "n1");
                 md.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer abc");
                 var stub = AgoraGrpc.newBlockingStub(ch).withInterceptors(MetadataUtils.newAttachHeadersInterceptor(md));
-                try {
-                    stub.locate(LocateRequest.getDefaultInstance());
-                    throw new AssertionError("expected UNIMPLEMENTED");
-                } catch (StatusRuntimeException e) {
-                    assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.UNIMPLEMENTED);
-                }
+                // A-12: Locate is wired in (an unknown player is not found).
+                assertThat(stub.locate(LocateRequest.newBuilder().setPlayer(java.util.UUID.randomUUID().toString())
+                        .build()).getFound()).isFalse();
                 // A-09: the Connect stream is wired in (paperWelcomeDelay 0 → Welcome at once).
                 LinkedBlockingQueue<ServiceMessage> received = new LinkedBlockingQueue<>();
                 StreamObserver<NodeMessage> conn = AgoraGrpc.newStub(ch)
