@@ -250,7 +250,10 @@ public final class HolderRegistry implements HolderSink, ChangePublisher, HelloL
             Instant end = sessionEnds.remove(nodeId);
             if (end == null) end = clock.instant();
             Holds h = byNode.get(nodeId);
-            if (h == null) return;
+            if (h == null) {
+                orphaned.remove(nodeId);
+                return;
+            }
             Instant until = end;
             for (Iterator<Map.Entry<UUID, Instant>> it = h.players.entrySet().iterator(); it.hasNext(); ) {
                 Map.Entry<UUID, Instant> e = it.next();
@@ -271,6 +274,7 @@ public final class HolderRegistry implements HolderSink, ChangePublisher, HelloL
             kept = h.players.size() + h.stores.size();
             dropIfEmpty(nodeId);
             if (kept > 0) orphaned.put(nodeId, clock.instant());
+            else orphaned.remove(nodeId);
         }
         LOG.debug("Node '{}' is gone, its holder entries were removed ({} newer ones kept)", nodeId, kept);
     }

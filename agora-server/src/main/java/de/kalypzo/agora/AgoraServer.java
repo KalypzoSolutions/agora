@@ -205,7 +205,7 @@ public final class AgoraServer {
     }
 
     /** Background jobs on the scheduler (A-13) and the sweep of orphaned holder entries (A-10); failures are logged. */
-    private static void scheduleJobs(ScheduledExecutorService scheduler, HikariDataSource ds, ChangePublisher changes) {
+    static void scheduleJobs(ScheduledExecutorService scheduler, javax.sql.DataSource ds, ChangePublisher changes) {
         Clock clock = Clock.systemUTC();
         scheduleLogged(scheduler, new ExpireJob(ds, changes, clock), ExpireJob.INTERVAL, "expire");
         scheduleLogged(scheduler, new IdempotencyCleanupJob(ds, clock), IdempotencyCleanupJob.INTERVAL,

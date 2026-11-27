@@ -116,6 +116,31 @@ class JobsTest {
     }
 
     @Test
+    void expireJobDeletesMoreRowsThanOneBatch() throws Exception {
+        for (int i = 0; i < 7; i++) insertDoc("lobby:clans", "d" + i, NOW.minusSeconds(1));
+        insertDoc("lobby:clans", "keep", NOW.plusSeconds(1));
+        List<DocChanged> published = new ArrayList<>();
+
+        new ExpireJob(ds, published::add, clock, 3).run();
+
+        assertThat(column("SELECT id FROM pantheon_doc")).containsExactly("keep");
+        assertThat(published).hasSize(7).allMatch(DocChanged::getDeleted);
+    }
+
+    @Test
+    void publishFailureDoesNotDropTheRest() throws Exception {
+        for (int i = 0; i < 3; i++) insertDoc("lobby:clans", "d" + i, NOW.minusSeconds(1));
+        List<DocChanged> published = new ArrayList<>();
+
+        new ExpireJob(ds, c -> {
+            published.add(c);
+            if (published.size() == 1) throw new IllegalStateException("boom");
+        }, clock).run();
+
+        assertThat(published).hasSize(3);
+    }
+
+    @Test
     void cleanupKeepsKeysYoungerThan24h() throws Exception {
         assertThat(IdempotencyCleanupJob.RETENTION).isEqualTo(Duration.ofHours(24));
         insertKey("young", NOW.minus(Duration.ofHours(23)).minus(Duration.ofMinutes(59)));
