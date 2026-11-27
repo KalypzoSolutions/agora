@@ -8,6 +8,7 @@ import de.kalypzo.agora.data.HolderSink;
 import de.kalypzo.agora.data.ReadService;
 import de.kalypzo.agora.db.Database;
 import de.kalypzo.agora.grpc.DataEndpoints;
+import de.kalypzo.agora.index.IndexService;
 import de.kalypzo.agora.db.Migrations;
 import de.kalypzo.agora.service.AgoraService;
 import io.grpc.Server;
@@ -63,6 +64,7 @@ public final class AgoraServer {
         try {
             Migrations.migrate(ds);
             DataEndpoints.register(service, new ReadService(ds, holders));
+            DataEndpoints.registerIndexes(service, new IndexService(ds));
             Server server = NettyServerBuilder.forPort(config.port())
                     .keepAliveTime(10, TimeUnit.SECONDS)
                     .permitKeepAliveTime(5, TimeUnit.SECONDS)

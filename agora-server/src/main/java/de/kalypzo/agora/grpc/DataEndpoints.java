@@ -2,7 +2,12 @@ package de.kalypzo.agora.grpc;
 
 import de.kalypzo.agora.auth.NodeIdentity;
 import de.kalypzo.agora.data.ReadService;
+import de.kalypzo.agora.index.IndexDeclarationException;
+import de.kalypzo.agora.index.IndexService;
+import de.kalypzo.agora.proto.v1.DeclareIndexResponse;
 import de.kalypzo.agora.service.AgoraService;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
@@ -33,6 +38,34 @@ public final class DataEndpoints {
         service.onQuery((req, out) -> reply(out, () -> reads.query(req.getTarget(), req.getSpec())));
         service.onCount((req, out) -> reply(out, () -> reads.count(req)));
         service.onVersions((req, out) -> reply(out, () -> reads.versions(req)));
+    }
+
+    /** Registers DeclareIndex (A-08). The build may outlast the client deadline; it then continues in the background. */
+    public static void registerIndexes(AgoraService service, IndexService indexes) {
+        service.onDeclareIndex((req, out) -> {
+            CompletableFuture<String> future;
+            try {
+                future = indexes.declare(req.getIndex());
+            } catch (IllegalArgumentException e) {
+                out.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
+                return;
+            }
+            future.whenComplete((name, error) -> {
+                if (error == null) {
+                    out.onNext(DeclareIndexResponse.newBuilder().setName(name).build());
+                    out.onCompleted();
+                    return;
+                }
+                Throwable cause = error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
+                if (cause instanceof IndexDeclarationException e) {
+                    Status status = e.duplicate() ? Status.ALREADY_EXISTS : Status.FAILED_PRECONDITION;
+                    out.onError(status.withDescription(e.getMessage()).asRuntimeException());
+                } else {
+                    LOG.error("Index declaration failed", cause);
+                    out.onError(Status.INTERNAL.withDescription("internal error").asRuntimeException());
+                }
+            });
+        });
     }
 
     /** Runs the call and maps failures to gRPC statuses: bad input, unavailable database, internal error. */
