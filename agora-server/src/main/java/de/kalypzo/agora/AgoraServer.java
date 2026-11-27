@@ -4,7 +4,10 @@ import com.zaxxer.hikari.HikariDataSource;
 import de.kalypzo.agora.auth.AuthInterceptor;
 import de.kalypzo.agora.auth.NodeTokens;
 import de.kalypzo.agora.config.AgoraConfig;
+import de.kalypzo.agora.data.HolderSink;
+import de.kalypzo.agora.data.ReadService;
 import de.kalypzo.agora.db.Database;
+import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.db.Migrations;
 import de.kalypzo.agora.service.AgoraService;
 import io.grpc.Server;
@@ -48,12 +51,18 @@ public final class AgoraServer {
     }
 
     public static AgoraServer start(AgoraConfig config, AgoraService service) {
+        return start(config, service, HolderSink.NOOP);
+    }
+
+    /** {@code holders} receives the LoadPlayer claims (A-10 passes the holder registry; until then a no-op). */
+    public static AgoraServer start(AgoraConfig config, AgoraService service, HolderSink holders) {
         NodeTokens tokens = NodeTokens.load(config.tokensFile());
         HealthStatusManager health = new HealthStatusManager();
         health.setStatus("", ServingStatus.NOT_SERVING);
         HikariDataSource ds = Database.open(config);
         try {
             Migrations.migrate(ds);
+            DataEndpoints.register(service, new ReadService(ds, holders));
             Server server = NettyServerBuilder.forPort(config.port())
                     .keepAliveTime(10, TimeUnit.SECONDS)
                     .permitKeepAliveTime(5, TimeUnit.SECONDS)
