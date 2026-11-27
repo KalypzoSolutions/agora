@@ -15,7 +15,10 @@ import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
 import de.kalypzo.agora.grpc.PresenceEndpoints;
 import de.kalypzo.agora.holder.HolderRegistry;
+import de.kalypzo.agora.audit.AuditIngest;
 import de.kalypzo.agora.audit.AuditPartitions;
+import de.kalypzo.agora.audit.AuditStore;
+import de.kalypzo.agora.grpc.AuditEndpoints;
 import de.kalypzo.agora.jobs.AuditPartitionJob;
 import de.kalypzo.agora.jobs.ExpireJob;
 import de.kalypzo.agora.jobs.IdempotencyCleanupJob;
@@ -49,6 +52,9 @@ public final class AgoraServer {
 
     private final AgoraConfig config;
     private final HikariDataSource dataSource;
+    /** E30: a full audit bundle is about 4 MiB, the gRPC default. */
+    static final int MAX_INBOUND_MESSAGE_SIZE = 16 * 1024 * 1024;
+
     private final AgoraService service;
     private final HealthStatusManager health;
     private final Server server;
@@ -187,9 +193,11 @@ public final class AgoraServer {
             DataEndpoints.registerWrites(service, new WriteService(ds, changes));
             IndexService indexes = new IndexService(ds);
             DataEndpoints.registerIndexes(service, indexes);
+            AuditEndpoints.register(service, new AuditIngest(new AuditStore(ds), Clock.systemUTC()));
             service.onConnect(new NodeStream(nodes, nodeMessages, presence, Clock.systemUTC(),
                     scheduler, config.paperWelcomeDelay(), NodeSession.DEFAULT_QUEUE_LIMIT));
             Server server = NettyServerBuilder.forPort(config.port())
+                    .maxInboundMessageSize(MAX_INBOUND_MESSAGE_SIZE) // E30
                     .keepAliveTime(10, TimeUnit.SECONDS)
                     .permitKeepAliveTime(5, TimeUnit.SECONDS)
                     .permitKeepAliveWithoutCalls(true)

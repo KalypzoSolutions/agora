@@ -51,6 +51,8 @@ class AgoraServerTest {
                 // A-12: Locate is wired in (an unknown player is not found).
                 assertThat(stub.locate(LocateRequest.newBuilder().setPlayer(java.util.UUID.randomUUID().toString())
                         .build()).getFound()).isFalse();
+                // A-17: AppendAudit is wired in (an empty bundle is accepted, not UNIMPLEMENTED).
+                stub.appendAudit(de.kalypzo.agora.proto.v1.AuditBundle.getDefaultInstance());
                 // A-09: the Connect stream is wired in (paperWelcomeDelay 0 → Welcome at once).
                 LinkedBlockingQueue<ServiceMessage> received = new LinkedBlockingQueue<>();
                 StreamObserver<NodeMessage> conn = AgoraGrpc.newStub(ch)
