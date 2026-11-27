@@ -16,6 +16,7 @@ public final class Database {
         cfg.setUsername(config.dbUser());
         cfg.setPassword(config.dbPassword());
         cfg.setMaximumPoolSize(config.dbPoolSize());
+        cfg.setConnectionTimeout(5_000); // no request may wait longer than the client deadline (5 s)
         return new HikariDataSource(cfg);
     }
 }

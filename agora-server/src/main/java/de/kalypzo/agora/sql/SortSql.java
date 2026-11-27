@@ -17,7 +17,13 @@ public final class SortSql {
 
     /** Like {@link #orderBy(String, List, String)}, with the row alias chosen per field (e.g. one join per namespace). */
     public static SqlFragment orderBy(Function<FieldSpec, String> aliasFor, List<Sort> sorts, String tieBreakColumn) {
-        String tieBreak = SqlLiteral.column(tieBreakColumn);
+        return orderBy(aliasFor, sorts, tieBreakColumn, false);
+    }
+
+    /** As above; {@code textTieBreak} compares the tie-break column binary ({@code COLLATE "C"}, E14) for text IDs. */
+    public static SqlFragment orderBy(
+            Function<FieldSpec, String> aliasFor, List<Sort> sorts, String tieBreakColumn, boolean textTieBreak) {
+        String tieBreak = SqlLiteral.column(tieBreakColumn) + (textTieBreak ? " COLLATE \"C\"" : "");
         List<SqlFragment> keys = new ArrayList<>();
         for (Sort s : sorts) {
             FieldSpec f = s.getField();

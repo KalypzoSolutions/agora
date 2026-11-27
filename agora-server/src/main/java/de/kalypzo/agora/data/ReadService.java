@@ -128,7 +128,7 @@ public final class ReadService {
                 case STORE -> {
                     String store = target.getStore();
                     SqlFragment where = storeWhere(store, spec.getWhereList());
-                    SqlFragment order = SortSql.orderBy("d", spec.getSortList(), "d.id");
+                    SqlFragment order = SortSql.orderBy(f -> "d", spec.getSortList(), "d.id", true);
                     SqlFragment sql = SqlFragment.concat(
                             SqlFragment.of("SELECT d.id, d.data::text, d.version FROM pantheon_doc d WHERE "),
                             where,
@@ -201,6 +201,12 @@ public final class ReadService {
         }
         List<UUID> players = new ArrayList<>();
         for (String p : request.getPlayersList()) players.add(uuid(p));
+        List<String> rowKeys = new ArrayList<>();
+        for (RowRef ref : request.getRowsList()) {
+            rowKeys.add(ref.hasPlayerRow()
+                    ? uuid(ref.getPlayerRow().getPlayer()) + "/" + ref.getPlayerRow().getNamespace()
+                    : ref.getStoreDoc().getStore() + "/" + ref.getStoreDoc().getId());
+        }
 
         VersionsResponse.Builder out = VersionsResponse.newBuilder();
         try (Connection c = ds.getConnection()) {
@@ -230,11 +236,9 @@ public final class ReadService {
                     while (rs.next()) docVersions.put(rs.getString(1) + "/" + rs.getString(2), rs.getLong(3));
                 }
             }
-            for (RowRef ref : request.getRowsList()) {
-                long v = ref.hasPlayerRow()
-                        ? playerVersions.getOrDefault(
-                                uuid(ref.getPlayerRow().getPlayer()) + "/" + ref.getPlayerRow().getNamespace(), 0L)
-                        : docVersions.getOrDefault(ref.getStoreDoc().getStore() + "/" + ref.getStoreDoc().getId(), 0L);
+            for (int i = 0; i < request.getRowsCount(); i++) {
+                RowRef ref = request.getRows(i);
+                long v = (ref.hasPlayerRow() ? playerVersions : docVersions).getOrDefault(rowKeys.get(i), 0L);
                 out.addVersions(RowVersion.newBuilder().setRef(ref).setVersion(v));
             }
             if (!players.isEmpty()) {

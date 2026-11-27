@@ -274,6 +274,14 @@ class ReadServiceTest {
     }
 
     @Test
+    void storeTieBreakIsBinary() throws Exception {
+        for (String id : List.of("B", "a", "_c", "A")) doc("lobby:clans", id, "{\"score\":1}", null);
+        QueryResponse q = query(store("lobby:clans"), QuerySpec.newBuilder().addSort(desc(SCORE)).build());
+        assertThat(q.getDocsList()).extracting(d -> d.getDoc().getStoreDoc().getId())
+                .containsExactly("A", "B", "_c", "a");
+    }
+
+    @Test
     void limitAbove1000IsRejected() {
         assertThatThrownBy(() -> query(players(), QuerySpec.newBuilder().setLimit(1001).build()))
                 .isInstanceOfSatisfying(StatusRuntimeException.class,
