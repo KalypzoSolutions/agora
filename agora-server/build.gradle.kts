@@ -49,6 +49,7 @@ publishing {
     }
 }
 
+// Local: jibDockerBuild -> agora:<version>. CI pushes to ghcr.io via -Djib.to.image/-Djib.to.tags.
 jib {
     from { image = "eclipse-temurin:25-jre" }
     to { image = "agora:${project.version}" }
@@ -57,5 +58,12 @@ jib {
         ports = listOf("9090")
         creationTime = "USE_CURRENT_TIMESTAMP"
         jvmFlags = listOf("--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=75")
+        // source links the ghcr.io package to the repository; title/description/version replace the base image's.
+        labels = mapOf(
+            "org.opencontainers.image.source" to "https://github.com/KalypzoSolutions/agora",
+            "org.opencontainers.image.title" to "agora",
+            "org.opencontainers.image.description" to "Agora gRPC server: player data, presence and messaging for Pantheon.",
+            "org.opencontainers.image.version" to project.version.toString(),
+        )
     }
 }

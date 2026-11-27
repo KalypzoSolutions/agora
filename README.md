@@ -10,13 +10,16 @@ Module: `agora-proto` (Proto und generierte Stubs), `agora-server` (Server).
 
 ## Veröffentlichung
 
-`agora-proto` liegt auf Maven Central als `de.kalypzo:agora-proto`. `agora-server` wird nicht veröffentlicht
-(Docker-Image), `publishToMavenLocal` stellt ihn für Pantheons Integrationstests bereit.
+`agora-proto` liegt auf Maven Central als `de.kalypzo:agora-proto`. `agora-server` kommt nicht nach Maven Central,
+sondern als Image nach `ghcr.io/kalypzosolutions/agora`; `publishToMavenLocal` stellt ihn für Pantheons
+Integrationstests bereit.
 
 - **Release:** Tag `v<version>` pushen (z. B. `git tag v0.1.0 && git push origin v0.1.0`). Der Workflow
-  `release.yml` baut mit `-Pversion=<version>` und gibt automatisch auf Central frei.
+  `release.yml` baut mit `-Pversion=<version>`, gibt automatisch auf Central frei und pusht das Image mit den Tags
+  `<version>` und `latest`.
 - **Snapshot:** jeder Push auf `main` veröffentlicht die `-SNAPSHOT`-Version aus `gradle.properties` nach
-  `https://central.sonatype.com/repository/maven-snapshots/`.
+  `https://central.sonatype.com/repository/maven-snapshots/` und pusht das Image mit den Tags `<version>-SNAPSHOT`
+  und `sha-<commit>`.
 - Nach einem Release die Version in `gradle.properties` auf die nächste `-SNAPSHOT` setzen.
 - Lokal: `./gradlew publishToMavenCentral` mit Zugangsdaten und Signing-Key in `~/.gradle/gradle.properties`.
 - GitHub-Secrets: `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, `SIGNING_KEY`, `SIGNING_KEY_ID`,
@@ -29,7 +32,7 @@ Module: `agora-proto` (Proto und generierte Stubs), `agora-server` (Server).
 ```
 docker run -p 9090:9090 -v ./tokens:/etc/agora/tokens:ro \
   -e AGORA_DB_URL=jdbc:postgresql://db:5432/agora -e AGORA_DB_USER=... -e AGORA_DB_PASSWORD=... \
-  -e AGORA_TOKENS_FILE=/etc/agora/tokens agora:<version>
+  -e AGORA_TOKENS_FILE=/etc/agora/tokens ghcr.io/kalypzosolutions/agora:<version>
 ```
 
 Image bauen: `./gradlew :agora-server:jibDockerBuild` (Basis `eclipse-temurin:25-jre`, Image `agora:<version>`).

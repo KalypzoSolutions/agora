@@ -1,4 +1,5 @@
-# Release: pushing a tag v<version> (e.g. v0.1.0) builds, tests and publishes agora-proto to Maven Central.
+# Release: pushing a tag v<version> (e.g. v0.1.0) builds, tests and publishes agora-proto to Maven Central
+# and the agora-server image to ghcr.io/kalypzosolutions/agora (tags <version> and latest).
 # The version comes from the tag (-Pversion overrides gradle.properties); no commit is made.
 name: Release
 
@@ -8,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   release:
@@ -20,6 +22,12 @@ jobs:
       ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Version from tag
         run: |
@@ -41,3 +49,8 @@ jobs:
 
       - name: Publish to Maven Central
         run: ./gradlew publishToMavenCentral -Pversion="$VERSION" --no-configuration-cache
+
+      - name: Push image to ghcr.io
+        run: |
+          ./gradlew :agora-server:jib -Pversion="$VERSION" --no-configuration-cache \
+            -Djib.to.image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION" -Djib.to.tags=latest

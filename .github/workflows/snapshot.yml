@@ -1,5 +1,6 @@
 # Snapshot: every push to main publishes the current -SNAPSHOT version (gradle.properties) of agora-proto
-# to https://central.sonatype.com/repository/maven-snapshots/.
+# to https://central.sonatype.com/repository/maven-snapshots/ and the agora-server image to
+# ghcr.io/kalypzosolutions/agora (tags <version>-SNAPSHOT and sha-<commit>).
 name: Snapshot
 
 on:
@@ -9,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: snapshot
@@ -25,6 +27,12 @@ jobs:
       ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Require a -SNAPSHOT version
         run: |
@@ -45,3 +53,9 @@ jobs:
 
       - name: Publish snapshot
         run: ./gradlew publishToMavenCentral --no-configuration-cache
+
+      - name: Push image to ghcr.io
+        run: |
+          VERSION=$(grep '^version=' gradle.properties | cut -d= -f2)
+          ./gradlew :agora-server:jib --no-configuration-cache \
+            -Djib.to.image="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION" -Djib.to.tags="sha-${GITHUB_SHA::7}"
