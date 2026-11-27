@@ -115,4 +115,38 @@ class AuditPartitionsTest {
         }
         assertThat(read).containsExactly(a, b, c);
     }
+
+    @Test
+    void cutoffBoundaryIsExact() throws Exception {
+        new AuditPartitions(ds, at("2026-11-27T12:00:00Z")).ensure(1);
+        // 20261127 ends 2026-11-28T00:00Z: one millisecond before the cutoff it stays, at the cutoff it goes
+        new AuditPartitions(ds, at("2026-12-11T23:59:59.999Z")).dropExpired(Duration.ofDays(14));
+        assertThat(partitions()).containsExactly("pantheon_audit_20261127", "pantheon_audit_20261128");
+        new AuditPartitions(ds, at("2026-12-12T00:00:00Z")).dropExpired(Duration.ofDays(14));
+        assertThat(partitions()).containsExactly("pantheon_audit_20261128");
+    }
+
+    @Test
+    void concurrentEnsureAndDropDoNotFail() throws Exception {
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(4);
+        try {
+            for (int round = 0; round < 5; round++) {
+                clean();
+                AuditPartitions p = new AuditPartitions(ds, at("2026-11-27T12:00:00Z"));
+                AuditPartitions later = new AuditPartitions(ds, at("2026-12-12T00:30:00Z"));
+                var go = new java.util.concurrent.CountDownLatch(1);
+                List<java.util.concurrent.Future<?>> fs = new ArrayList<>();
+                for (int i = 0; i < 2; i++) {
+                    fs.add(pool.submit(() -> { go.await(); p.ensure(2); return null; }));
+                }
+                fs.add(pool.submit(() -> { go.await(); later.dropExpired(Duration.ofDays(14)); return null; }));
+                go.countDown();
+                for (var f : fs) f.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                p.ensure(2);
+                assertThat(partitions()).contains("pantheon_audit_20261128", "pantheon_audit_20261129");
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
 }

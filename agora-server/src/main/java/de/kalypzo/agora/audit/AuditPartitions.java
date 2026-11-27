@@ -23,6 +23,9 @@ public final class AuditPartitions {
     private static final String PREFIX = "pantheon_audit_";
     private static final DateTimeFormatter DAY = DateTimeFormatter.BASIC_ISO_DATE;
 
+    /** Advisory lock key serialising ensure/dropExpired across threads and Agora instances. */
+    private static final long LOCK_KEY = 0x70616e5f61756431L;
+
     private final DataSource ds;
     private final Clock clock;
 
@@ -35,12 +38,15 @@ public final class AuditPartitions {
     public void ensure(int daysAhead) {
         LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            c.setAutoCommit(false);
+            st.execute("SELECT pg_advisory_xact_lock(" + LOCK_KEY + ")");
             for (int i = 0; i <= daysAhead; i++) {
                 LocalDate day = today.plusDays(i);
                 st.execute("CREATE TABLE IF NOT EXISTS " + PREFIX + DAY.format(day)
                         + " PARTITION OF pantheon_audit FOR VALUES FROM ('" + bound(day) + "') TO ('"
                         + bound(day.plusDays(1)) + "')");
             }
+            c.commit();
         } catch (SQLException e) {
             throw new IllegalStateException("creating audit partitions failed", e);
         }
@@ -50,6 +56,9 @@ public final class AuditPartitions {
     public void dropExpired(Duration retention) {
         Instant cutoff = clock.instant().minus(retention);
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+            c.setAutoCommit(false);
+            st.execute("SELECT pg_advisory_xact_lock(" + LOCK_KEY + ")");
+            st.execute("SET LOCAL lock_timeout = '10s'");
             for (String name : partitionNames(st)) {
                 LocalDate day;
                 try {
@@ -62,6 +71,7 @@ public final class AuditPartitions {
                     LOG.info("Dropped expired audit partition {}", name);
                 }
             }
+            c.commit();
         } catch (SQLException e) {
             throw new IllegalStateException("dropping audit partitions failed", e);
         }

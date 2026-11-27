@@ -25,7 +25,7 @@ class UuidV7Test {
         Instant t = Instant.parse("2026-11-27T12:34:56.789Z");
         assertThat(UuidV7.timestamp(UuidV7.lowerBound(t))).isEqualTo(t);
         Clock clock = Clock.fixed(t, ZoneOffset.UTC);
-        UUID id = UuidV7.next(clock);
+        UUID id = new UuidV7.Generator().next(clock);
         assertThat(UuidV7.timestamp(id)).isEqualTo(t);
         assertThat(id.version()).isEqualTo(7);
         assertThat(id.variant()).isEqualTo(2);
@@ -34,9 +34,10 @@ class UuidV7Test {
     @Test
     void monotonicWithinMillisecond() {
         Clock clock = Clock.fixed(Instant.parse("2026-11-27T12:00:00Z"), ZoneOffset.UTC);
+        UuidV7.Generator gen = new UuidV7.Generator();
         byte[] previous = null;
         for (int i = 0; i < 1000; i++) {
-            UUID id = UuidV7.next(clock);
+            UUID id = gen.next(clock);
             assertThat(id.version()).isEqualTo(7);
             assertThat(id.variant()).isEqualTo(2);
             byte[] bytes = ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())

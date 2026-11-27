@@ -10,6 +10,8 @@ public final class AuditPartitionJob implements Runnable {
     public static final int DAYS_AHEAD = 2;
     public static final Duration RETENTION = Duration.ofDays(14);
 
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(AuditPartitionJob.class);
+
     private final AuditPartitions partitions;
 
     public AuditPartitionJob(AuditPartitions partitions) {
@@ -18,7 +20,20 @@ public final class AuditPartitionJob implements Runnable {
 
     @Override
     public void run() {
-        partitions.ensure(DAYS_AHEAD);
-        partitions.dropExpired(RETENTION);
+        RuntimeException failure = null;
+        try {
+            partitions.ensure(DAYS_AHEAD);
+        } catch (RuntimeException e) {
+            LOG.error("Ensuring audit partitions failed", e);
+            failure = e;
+        }
+        try {
+            partitions.dropExpired(RETENTION);
+        } catch (RuntimeException e) {
+            LOG.error("Dropping expired audit partitions failed", e);
+            if (failure == null) failure = e;
+            else failure.addSuppressed(e);
+        }
+        if (failure != null) throw failure;
     }
 }
