@@ -1,0 +1,42 @@
+[versions]
+grpc = "1.74.0"
+protobuf = "3.25.5"
+protobuf-plugin = "0.9.6"
+hikaricp = "7.0.2"
+flyway = "12.0.2"
+postgresql = "42.7.10"
+slf4j = "2.0.17"
+logback = "1.5.18"
+junit = "6.0.1"
+assertj = "3.27.3"
+testcontainers = "2.0.5"
+awaitility = "4.3.0"
+jib = "3.4.5"
+tomcat-annotations-api = "6.0.53"
+
+[libraries]
+grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
+grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
+grpc-services = { module = "io.grpc:grpc-services", version.ref = "grpc" }
+grpc-inprocess = { module = "io.grpc:grpc-inprocess", version.ref = "grpc" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+tomcat-annotations-api = { module = "org.apache.tomcat:annotations-api", version.ref = "tomcat-annotations-api" }
+hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
+flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
+flyway-database-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version.ref = "testcontainers" }
+testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql" }
+testcontainers-junit-jupiter = { module = "org.testcontainers:testcontainers-junit-jupiter" }
+awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
+
+[plugins]
+protobuf = { id = "com.google.protobuf", version.ref = "protobuf-plugin" }
+jib = { id = "com.google.cloud.tools.jib", version.ref = "jib" }
