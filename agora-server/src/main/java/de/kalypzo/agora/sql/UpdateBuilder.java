@@ -49,6 +49,14 @@ public final class UpdateBuilder {
      * {@code withdraw} after any other operation on the same field is rejected.
      */
     public static List<Condition> implicitConditions(List<FieldOp> ops) {
+        try {
+            return conditions(ops);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("inc/withdraw amounts overflow a long", e);
+        }
+    }
+
+    private static List<Condition> conditions(List<FieldOp> ops) {
         List<Condition> out = new ArrayList<>();
         Map<String, Long> delta = new HashMap<>();
         Map<String, Boolean> tainted = new HashMap<>();
@@ -116,14 +124,19 @@ public final class UpdateBuilder {
         };
     }
 
-    /** {@code to_jsonb(COALESCE(<current as number>, d) + delta)}; {@code withdraw} is {@code inc(-amount)}. */
+    /** {@code to_jsonb(COALESCE(<current as number>, d or 0) + delta)}; {@code withdraw} is {@code inc(-amount)}. */
     private static SqlFragment add(SqlFragment current, FieldSpec f, long delta) {
         if (f.getType() != ScalarType.LONG && f.getType() != ScalarType.DOUBLE) {
             throw new IllegalArgumentException("inc/withdraw needs a LONG or DOUBLE field: " + f.getName());
         }
+        SqlFragment value = typedOf(current, f);
+        if (!f.hasDefaultValue() || Values.isNull(f.getDefaultValue())) {
+            // R34: without a default a missing number starts at 0.
+            value = SqlFragment.concat(SqlFragment.of("COALESCE("), value, SqlFragment.of(", 0)"));
+        }
         return SqlFragment.concat(
                 SqlFragment.of("to_jsonb("),
-                typedOf(current, f),
+                value,
                 SqlFragment.of(" + ?::" + SqlLiteral.sqlType(f.getType()) + ")", delta));
     }
 

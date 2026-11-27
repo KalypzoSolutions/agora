@@ -53,6 +53,9 @@ public final class SqlLiteral {
     public static String typed(Value v, ScalarType type) {
         Values.requireCompatible(v, type, "default");
         if (Values.isNull(v)) return "NULL::" + sqlType(type);
+        if (v.hasDoubleValue() && !Double.isFinite(v.getDoubleValue())) {
+            throw new IllegalArgumentException("default must be finite, was " + v.getDoubleValue());
+        }
         return switch (type) {
             case LONG -> "'" + v.getLongValue() + "'::bigint";
             case DOUBLE -> "'" + (v.hasLongValue() ? Long.toString(v.getLongValue()) : Double.toString(v.getDoubleValue()))

@@ -235,26 +235,126 @@ class SqlSemanticsTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    /** R4: the read expression is usable verbatim as an expression index and the planner matches it. */
+    /** R4: the read expression is usable verbatim as an expression index and the planner matches it (R35 form). */
     @Test
     void readIsUsableAsIndexExpression() throws SQLException {
-        FieldSpec coins = field("coins", ScalarType.LONG, lv(0));
-        String expr = FieldExpr.read("", coins).sql();
+        assertIndexUsed(field("coins", ScalarType.LONG, lv(0)));
+        assertIndexUsed(field("coins", ScalarType.LONG));
+    }
+
+    private static void assertIndexUsed(FieldSpec f) throws SQLException {
+        String expr = FieldExpr.read("", f).sql();
         try (Connection c = ds.getConnection(); var st = c.createStatement()) {
             st.execute("CREATE INDEX sql_semantics_idx ON pantheon_doc ((" + expr + ")) WHERE store = "
                     + SqlLiteral.store("t:idx"));
-            st.execute("SET enable_seqscan = off");
-            SqlFragment where = PredicateSql.where("d", cond(coins, Predicate.newBuilder().setGt(lv(10)).build()));
             StringBuilder plan = new StringBuilder();
-            try (PreparedStatement ps = c.prepareStatement("EXPLAIN SELECT d.id FROM pantheon_doc d WHERE d.store = "
-                    + SqlLiteral.store("t:idx") + " AND " + where.sql())) {
-                bind(ps, where.params(), 1);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) plan.append(rs.getString(1)).append('\n');
+            try {
+                st.execute("SET enable_seqscan = off");
+                SqlFragment where = PredicateSql.where("d", cond(f, Predicate.newBuilder().setGt(lv(10)).build()));
+                try (PreparedStatement ps = c.prepareStatement("EXPLAIN SELECT d.id FROM pantheon_doc d WHERE d.store = "
+                        + SqlLiteral.store("t:idx") + " AND " + where.sql())) {
+                    bind(ps, where.params(), 1);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                    }
                 }
+            } finally {
+                st.execute("RESET enable_seqscan");
+                st.execute("DROP INDEX sql_semantics_idx");
             }
-            st.execute("DROP INDEX sql_semantics_idx");
-            assertThat(plan.toString()).contains("sql_semantics_idx");
+            assertThat(plan.toString()).contains("Index").contains("sql_semantics_idx");
+        }
+    }
+
+    // ---------- fix round 1: R32-R36 ----------
+
+    /** R32: contains means deep element equality, not jsonb containment. */
+    @Test
+    void containsUsesDeepElementEquality() throws SQLException {
+        FieldSpec sets = field("k", ScalarType.SET, list());
+        String nested = "{\"k\": [[1, 2], {\"a\": 1, \"b\": 2}, 3]}";
+        assertThat(test(nested, cond(sets, contains(list(lv(1)))))).isFalse();
+        assertThat(test(nested, cond(sets, contains(list(lv(1), lv(2)))))).isTrue();
+        assertThat(test(nested, cond(sets, contains(map("a", lv(1)))))).isFalse();
+        assertThat(test(nested, cond(sets, contains(map("a", lv(1), "b", lv(2)))))).isTrue();
+        assertThat(test(nested, cond(sets, contains(lv(3))))).isTrue();
+        assertThat(test(nested, cond(sets, contains(Value.newBuilder().setDoubleValue(3.0).build())))).isTrue();
+        FieldSpec lists = field("k", ScalarType.LIST);
+        assertThat(test(nested, cond(lists, contains(list(lv(1)))))).isFalse();
+        assertThat(test("{\"k\": [[[1]]]}", cond(lists, contains(list(list(lv(1))))))).isTrue();
+        assertThat(test("{}", cond(lists, contains(lv(1))))).isFalse();
+    }
+
+    /** R33: eq/ne on SET is order-independent; LIST stays order-dependent. */
+    @Test
+    void setEqualityIgnoresOrder() throws SQLException {
+        FieldSpec set = field("k", ScalarType.SET);
+        FieldSpec lst = field("k", ScalarType.LIST);
+        String ab = "{\"k\": [\"a\", \"b\"]}";
+        Value ba = list(sv("b"), sv("a"));
+        assertThat(test(ab, cond(set, Predicate.newBuilder().setEq(ba).build()))).isTrue();
+        assertThat(test(ab, cond(set, Predicate.newBuilder().setNe(ba).build()))).isFalse();
+        assertThat(test(ab, cond(set, Predicate.newBuilder().setEq(list(sv("a"))).build()))).isFalse();
+        assertThat(test(ab, cond(set, Predicate.newBuilder().setNe(list(sv("a"), sv("c"))).build()))).isTrue();
+        assertThat(test(ab, cond(lst, Predicate.newBuilder().setEq(ba).build()))).isFalse();
+        assertThat(test(ab, cond(lst, Predicate.newBuilder().setEq(list(sv("a"), sv("b"))).build()))).isTrue();
+        assertThat(test("{\"k\": [[1, 2], 3]}", cond(set, Predicate.newBuilder().setEq(list(lv(3), list(lv(1), lv(2)))).build())))
+                .isTrue();
+        assertThat(test("{\"k\": [[2, 1]]}", cond(set, Predicate.newBuilder().setEq(list(list(lv(1), lv(2)))).build())))
+                .isFalse();
+        assertThat(test("{}", cond(set, Predicate.newBuilder().setEq(list()).build()))).isFalse();
+        assertThat(test("{}", cond(set, Predicate.newBuilder().setNe(list()).build()))).isFalse();
+        FieldSpec withDefault = field("k", ScalarType.SET, list());
+        assertThat(test("{}", cond(withDefault, Predicate.newBuilder().setEq(list()).build()))).isTrue();
+    }
+
+    /** R34: inc/withdraw on a missing field without default start at 0. */
+    @Test
+    void incStartsAtZeroWithoutDefault() throws SQLException {
+        FieldSpec l = field("l", ScalarType.LONG);
+        assertThat(apply("{}", inc(l, 2))).isEqualTo("{\"l\": 2}");
+        FieldSpec d = field("d", ScalarType.DOUBLE);
+        assertThat(apply("{}", inc(d, -3))).isEqualTo("{\"d\": -3}");
+    }
+
+    /** R35: where() is always true or false, never SQL NULL. */
+    @Test
+    void whereNeverYieldsNull() throws SQLException {
+        FieldSpec l = field("l", ScalarType.LONG);
+        FieldSpec s = field("s", ScalarType.STRING);
+        FieldSpec set = field("k", ScalarType.SET);
+        FieldSpec obj = field("o", ScalarType.OBJECT);
+        List<Condition> conds = List.of(
+                cond(l, Predicate.newBuilder().setEq(lv(1)).build()),
+                cond(l, Predicate.newBuilder().setNe(lv(1)).build()),
+                cond(l, Predicate.newBuilder().setGt(lv(1)).build()),
+                cond(l, Predicate.newBuilder().setLte(lv(1)).build()),
+                cond(s, Predicate.newBuilder().setLt(sv("a")).build()),
+                cond(l, Predicate.newBuilder().setInValues(ValueList.newBuilder()
+                        .addValues(lv(1)).addValues(Value.newBuilder().setNullValue(true))).build()),
+                cond(set, contains(lv(1))),
+                cond(set, Predicate.newBuilder().setEq(list()).build()),
+                cond(obj, Predicate.newBuilder().setEq(map("a", lv(1))).build()),
+                cond(l, Predicate.newBuilder().setExists(true).build()));
+        for (Condition c : conds) {
+            assertThat(isNull("{}", c)).as(c.toString()).isFalse();
+            assertThat(isNull("{\"l\": 2, \"s\": \"b\", \"k\": [2], \"o\": {}}", c)).as(c.toString()).isFalse();
+        }
+        assertThat(isNull("{\"l\": 2}", cond(l, Predicate.newBuilder().setInValues(ValueList.newBuilder()
+                .addValues(lv(1)).addValues(Value.newBuilder().setNullValue(true))).build()))).isFalse();
+    }
+
+    /** R36: overflow in implicitConditions and non-finite DOUBLE defaults are IllegalArgumentException. */
+    @Test
+    void overflowAndNonFiniteDefaultsAreRejected() {
+        FieldSpec coins = field("coins", ScalarType.LONG, lv(0));
+        assertThatThrownBy(() -> UpdateBuilder.implicitConditions(List.of(inc(coins, Long.MIN_VALUE), withdraw(coins, 1))))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> UpdateBuilder.implicitConditions(List.of(inc(coins, Long.MAX_VALUE), inc(coins, 1))))
+                .isInstanceOf(IllegalArgumentException.class);
+        for (double bad : new double[] {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
+            FieldSpec d = field("d", ScalarType.DOUBLE, Value.newBuilder().setDoubleValue(bad).build());
+            assertThatThrownBy(() -> FieldExpr.read("a", d)).isInstanceOf(IllegalArgumentException.class);
         }
     }
 
@@ -332,6 +432,13 @@ class SqlSemanticsTest {
         return "t".equals(single(sql, w.params(), data));
     }
 
+    private static boolean isNull(String data, Condition c) throws SQLException {
+        SqlFragment w = PredicateSql.where("a", c);
+        // data is the first placeholder, the predicate's parameters follow
+        return "t".equals(single("SELECT w.x IS NULL FROM (SELECT ?::jsonb AS data) a"
+                + " CROSS JOIN LATERAL (SELECT (" + w.sql() + ") AS x) w", w.params(), data));
+    }
+
     private static String single(String sql, List<Object> params, String data) throws SQLException {
         try (Connection c = ds.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, data);
@@ -389,6 +496,16 @@ class SqlSemanticsTest {
 
     private static Value list(Value... vs) {
         return Value.newBuilder().setListValue(ValueList.newBuilder().addAllValues(List.of(vs))).build();
+    }
+
+    private static Predicate contains(Value v) {
+        return Predicate.newBuilder().setContains(v).build();
+    }
+
+    private static Value map(Object... kv) {
+        var m = de.kalypzo.agora.proto.v1.ValueMap.newBuilder();
+        for (int i = 0; i < kv.length; i += 2) m.putFields((String) kv[i], (Value) kv[i + 1]);
+        return Value.newBuilder().setMapValue(m).build();
     }
 
     private static FieldOp inc(FieldSpec f, long n) {
