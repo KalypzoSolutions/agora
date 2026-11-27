@@ -14,6 +14,13 @@ import de.kalypzo.agora.proto.v1.LocateRequest;
 import io.grpc.Metadata;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.MetadataUtils;
+import io.grpc.stub.StreamObserver;
+import de.kalypzo.agora.proto.v1.Hello;
+import de.kalypzo.agora.proto.v1.NodeKind;
+import de.kalypzo.agora.proto.v1.NodeMessage;
+import de.kalypzo.agora.proto.v1.ServiceMessage;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -47,6 +54,22 @@ class AgoraServerTest {
                 } catch (StatusRuntimeException e) {
                     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.UNIMPLEMENTED);
                 }
+                // A-09: the Connect stream is wired in (paperWelcomeDelay 0 → Welcome at once).
+                LinkedBlockingQueue<ServiceMessage> received = new LinkedBlockingQueue<>();
+                StreamObserver<NodeMessage> conn = AgoraGrpc.newStub(ch)
+                        .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(md))
+                        .connect(new StreamObserver<>() {
+                            @Override public void onNext(ServiceMessage m) { received.add(m); }
+                            @Override public void onError(Throwable t) {}
+                            @Override public void onCompleted() {}
+                        });
+                conn.onNext(NodeMessage.newBuilder()
+                        .setHello(Hello.newBuilder().setNodeId("n1").setKind(NodeKind.PAPER)).build());
+                ServiceMessage welcome = received.poll(5, TimeUnit.SECONDS);
+                assertThat(welcome).isNotNull();
+                assertThat(welcome.hasWelcome()).isTrue();
+                assertThat(server.nodes().get("n1")).isPresent();
+                conn.onCompleted();
             } finally {
                 ch.shutdownNow();
                 server.close();
