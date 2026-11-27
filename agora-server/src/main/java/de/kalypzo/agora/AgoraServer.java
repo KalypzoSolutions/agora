@@ -93,9 +93,9 @@ public final class AgoraServer {
     }
 
     /**
-     * {@code holders} receives the LoadPlayer claims; no changes are published (use the default
-     * {@link #start(AgoraConfig, AgoraService)} for the holder routing of A-10). Wires the presence (A-11):
-     * {@code ClaimPresence}, the stream handlers and the {@code Welcome} snapshot.
+     * {@code holders} additionally receives the LoadPlayer claims; a {@link HolderRegistry} of its own is installed
+     * as well and routes the changes (A-10). Wires the presence (A-11): {@code ClaimPresence}, the stream handlers
+     * and the {@code Welcome} snapshot.
      */
     public static AgoraServer start(AgoraConfig config, AgoraService service, HolderSink holders) {
         NodeRegistry nodes = new NodeRegistry();
@@ -113,6 +113,10 @@ public final class AgoraServer {
      * {@code PresenceService} also calls {@code presence.install(nodeMessages)} and
      * {@code PresenceEndpoints.register(service, presence, nodes)}, otherwise ClaimPresence stays UNIMPLEMENTED (see
      * {@link #start(AgoraConfig, AgoraService, HolderSink)}).
+     *
+     * <p>Changes are always routed (A-10): if {@code holders} is a {@link HolderRegistry} it is installed on
+     * {@code nodeMessages} (idempotent) and used as publisher; otherwise a new {@code HolderRegistry} on {@code nodes}
+     * is installed and {@code holders} additionally receives the LoadPlayer claims.
      */
     public static AgoraServer start(
             AgoraConfig config,
@@ -121,7 +125,13 @@ public final class AgoraServer {
             NodeRegistry nodes,
             NodeMessageDispatcher nodeMessages,
             PresenceSnapshot presence) {
-        return start(config, service, holders, nodes, nodeMessages, presence, ChangePublisher.NOOP);
+        HolderRegistry registry = holders instanceof HolderRegistry r ? r : new HolderRegistry(nodes);
+        registry.install(nodeMessages);
+        HolderSink sink = registry == holders ? registry : (nodeId, player) -> {
+            registry.addPlayerHolder(nodeId, player);
+            holders.addPlayerHolder(nodeId, player);
+        };
+        return start(config, service, sink, nodes, nodeMessages, presence, registry);
     }
 
     /** As above; {@code changes} receives every committed write after its commit (A-10 routes it to the holders). */

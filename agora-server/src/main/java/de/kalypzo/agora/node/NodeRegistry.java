@@ -51,6 +51,7 @@ public final class NodeRegistry {
     private final ConcurrentHashMap<String, CompletableFuture<Void>> lanes = new ConcurrentHashMap<>();
     private final AtomicLong generations = new AtomicLong();
     private final List<Consumer<NodeSession>> goneListeners = new CopyOnWriteArrayList<>();
+    private final List<Consumer<NodeSession>> endListeners = new CopyOnWriteArrayList<>();
     private volatile boolean shuttingDown;
 
     /** @param executor runs the lane tasks (serialized per node id by the registry) */
@@ -114,6 +115,16 @@ public final class NodeRegistry {
     public Subscription onNodeGone(Consumer<NodeSession> listener) {
         goneListeners.add(listener);
         return () -> goneListeners.remove(listener);
+    }
+
+    /**
+     * Called synchronously, on the thread that ended it, when the registered (not replaced) session of a node ends,
+     * before its node-gone is queued and before the session is removed from {@link #get}. Lets a node-gone listener
+     * tell what happened after the end (A-10: a LoadPlayer in the gap). Must not block.
+     */
+    public Subscription onSessionEnded(Consumer<NodeSession> listener) {
+        endListeners.add(listener);
+        return () -> endListeners.remove(listener);
     }
 
     /**
@@ -185,7 +196,15 @@ public final class NodeRegistry {
     }
 
     private void ended(NodeSession s) {
-        if (!sessions.remove(s.nodeId(), s)) return; // replaced: the new session owns the node id
+        if (sessions.get(s.nodeId()) != s) return; // replaced: the new session owns the node id
+        for (Consumer<NodeSession> l : endListeners) {
+            try {
+                l.accept(s);
+            } catch (RuntimeException e) {
+                LOG.error("Session-end listener failed for '{}'", s.nodeId(), e);
+            }
+        }
+        if (!sessions.remove(s.nodeId(), s)) return; // replaced meanwhile
         if (shuttingDown) return;
         serialize(s.nodeId(), () -> {
             if (shuttingDown) return;

@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
@@ -360,6 +361,162 @@ class HolderRoutingTest {
         assertThat(echo.getVersion()).isEqualTo(version);
         assertThat(echo.getIdempotencyKey()).isEqualTo(key);
         assertThat(atB.getIdempotencyKey()).isEqualTo(key);
+    }
+
+    // ---------- A-10 follow-up (review minors 1-3) ----------
+
+    @Test
+    void staleHeartbeatAfterReleaseDoesNotRestoreHolder() throws Exception {
+        start();
+        Client a = connect("lobby-01", "tok-a");
+        UUID p = UUID.randomUUID();
+        loadPlayer("lobby-01", "tok-a", p);
+        a.send(NodeMessage.newBuilder().setWatchStore(WatchStore.newBuilder().setStore(CLANS)).build());
+        processed(a);
+
+        // Release and Unwatch at T0+1, then a heartbeat that was built before them still lists p and CLANS.
+        clock.set(T0.plusSeconds(1));
+        a.send(NodeMessage.newBuilder().setReleasePlayer(ReleasePlayer.newBuilder().setPlayer(p.toString())).build());
+        a.send(NodeMessage.newBuilder().setUnwatchStore(UnwatchStore.newBuilder().setStore(CLANS)).build());
+        processed(a); // the tombstones carry T0+1
+        clock.set(T0.plusSeconds(2));
+        a.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().addHeldPlayers(p.toString())
+                .addWatchedStores(CLANS)).build());
+        processed(a);
+        assertThat(holders.holdersOf(p)).isEmpty();
+        assertThat(holders.watchersOf(CLANS)).isEmpty();
+
+        // Exactly 10 s after the release the tombstone has ended: a heartbeat repairs a lost holder again.
+        clock.set(T0.plusSeconds(11));
+        a.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().addHeldPlayers(p.toString())
+                .addWatchedStores(CLANS)).build());
+        processed(a);
+        assertThat(holders.holdersOf(p)).containsExactly("lobby-01");
+        assertThat(holders.watchersOf(CLANS)).containsExactly("lobby-01");
+    }
+
+    @Test
+    void explicitLoadAndWatchOverrideTombstone() throws Exception {
+        start();
+        Client a = connect("lobby-01", "tok-a");
+        UUID p = UUID.randomUUID();
+        loadPlayer("lobby-01", "tok-a", p);
+        a.send(NodeMessage.newBuilder().setWatchStore(WatchStore.newBuilder().setStore(CLANS)).build());
+        clock.set(T0.plusSeconds(1));
+        a.send(NodeMessage.newBuilder().setReleasePlayer(ReleasePlayer.newBuilder().setPlayer(p.toString())).build());
+        a.send(NodeMessage.newBuilder().setUnwatchStore(UnwatchStore.newBuilder().setStore(CLANS)).build());
+        processed(a);
+        assertThat(holders.holdersOf(p)).isEmpty();
+
+        // A new LoadPlayer / WatchStore is a newer registration than the tombstone.
+        clock.set(T0.plusSeconds(2));
+        loadPlayer("lobby-01", "tok-a", p);
+        a.send(NodeMessage.newBuilder().setWatchStore(WatchStore.newBuilder().setStore(CLANS)).build());
+        processed(a);
+        assertThat(holders.holdersOf(p)).containsExactly("lobby-01");
+        assertThat(holders.watchersOf(CLANS)).containsExactly("lobby-01");
+
+        // 10 s after the re-registration (11 s after the release) a heartbeat listing both keeps them.
+        clock.set(T0.plusSeconds(12));
+        a.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().addHeldPlayers(p.toString())
+                .addWatchedStores(CLANS)).build());
+        processed(a);
+        assertThat(holders.holdersOf(p)).containsExactly("lobby-01");
+        assertThat(holders.watchersOf(CLANS)).containsExactly("lobby-01");
+        apply("lobby-02", "tok-b", key(), player(p), inc(COINS, 1));
+        assertThat(a.nextDocChanged().getRef()).isEqualTo(playerRow(p, "economy"));
+    }
+
+    @Test
+    void loadPlayerInNodeGoneGapKeepsHolder() throws Exception {
+        start();
+        Client a = connect("lobby-01", "tok-a");
+        UUID old = UUID.randomUUID();
+        UUID gap = UUID.randomUUID();
+        loadPlayer("lobby-01", "tok-a", old);
+        a.send(NodeMessage.newBuilder().setWatchStore(WatchStore.newBuilder().setStore(CLANS)).build());
+        processed(a);
+
+        // Hold the lane so that node-gone runs only after the LoadPlayer in the gap.
+        CountDownLatch gate = new CountDownLatch(1);
+        server.nodes().serialize("lobby-01", () -> {
+            try {
+                gate.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        clock.set(T0.plusSeconds(1));
+        a.cancel();
+        await().atMost(Duration.ofSeconds(5)).until(() -> server.nodes().get("lobby-01").isEmpty());
+        clock.set(T0.plusSeconds(2));
+        loadPlayer("lobby-01", "tok-a", gap);
+        gate.countDown();
+        server.nodes().serialize("lobby-01", () -> {}).get(5, TimeUnit.SECONDS);
+
+        assertThat(holders.holdersOf(old)).isEmpty();
+        assertThat(holders.watchersOf(CLANS)).isEmpty();
+        assertThat(holders.holdersOf(gap)).containsExactly("lobby-01");
+    }
+
+    @Test
+    void sixArgStartRoutesChanges() throws Exception {
+        AgoraService service = new AgoraService();
+        NodeRegistry nodes = new NodeRegistry();
+        NodeMessageDispatcher dispatcher = new NodeMessageDispatcher();
+        PresenceService presence = new PresenceService(nodes);
+        presence.install(dispatcher);
+        PresenceEndpoints.register(service, presence, nodes);
+        List<UUID> claims = new java.util.concurrent.CopyOnWriteArrayList<>();
+        server = AgoraServer.start(config(), service, (node, player) -> claims.add(player), nodes, dispatcher,
+                presence);
+        afterStart();
+        assertRoutesAndForwardsClaims(claims);
+    }
+
+    @Test
+    void threeArgStartRoutesChanges() throws Exception {
+        List<UUID> claims = new java.util.concurrent.CopyOnWriteArrayList<>();
+        server = AgoraServer.start(config(), new AgoraService(), (node, player) -> claims.add(player));
+        afterStart();
+        assertRoutesAndForwardsClaims(claims);
+    }
+
+    @Test
+    void sixArgStartWithRegistryUsesIt() throws Exception {
+        AgoraService service = new AgoraService();
+        NodeRegistry nodes = new NodeRegistry();
+        NodeMessageDispatcher dispatcher = new NodeMessageDispatcher();
+        PresenceService presence = new PresenceService(nodes);
+        presence.install(dispatcher);
+        PresenceEndpoints.register(service, presence, nodes);
+        holders = new HolderRegistry(nodes, clock); // not installed by the caller: the overload installs it
+        server = AgoraServer.start(config(), service, holders, nodes, dispatcher, presence);
+        afterStart();
+        Client a = connect("lobby-01", "tok-a");
+        UUID p = UUID.randomUUID();
+        loadPlayer("lobby-01", "tok-a", p);
+        assertThat(holders.holdersOf(p)).containsExactly("lobby-01");
+        apply("lobby-02", "tok-b", key(), player(p), inc(COINS, 1));
+        assertThat(a.nextDocChanged().getRef()).isEqualTo(playerRow(p, "economy"));
+        // Installed on the dispatcher: a heartbeat reaches it.
+        UUID q = UUID.randomUUID();
+        a.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.newBuilder().addHeldPlayers(p.toString())
+                .addHeldPlayers(q.toString())).build());
+        processed(a);
+        assertThat(holders.holdersOf(q)).containsExactly("lobby-01");
+    }
+
+    void assertRoutesAndForwardsClaims(List<UUID> claims) throws Exception {
+        Client a = connect("lobby-01", "tok-a");
+        UUID p = UUID.randomUUID();
+        loadPlayer("lobby-01", "tok-a", p);
+        assertThat(claims).containsExactly(p);
+        String key = key();
+        apply("lobby-02", "tok-b", key, player(p), inc(COINS, 4));
+        DocChanged e = a.nextDocChanged();
+        assertThat(e.getRef()).isEqualTo(playerRow(p, "economy"));
+        assertThat(e.getIdempotencyKey()).isEqualTo(key);
     }
 
     // ---------- helpers ----------
