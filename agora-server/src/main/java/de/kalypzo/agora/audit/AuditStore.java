@@ -86,12 +86,21 @@ public class AuditStore {
             switch (v.getValueCase()) {
                 case S -> quote(sb, v.getS());
                 case L -> sb.append(v.getL());
-                case D -> sb.append(v.getD());
+                case D -> sb.append(plain(v.getD()));
                 case B -> sb.append(v.getB());
                 case VALUE_NOT_SET -> sb.append("null");
             }
         }
         return sb.append('}').toString();
+    }
+
+    /**
+     * Doubles always carry a decimal point, so that they stay doubles when read back (jsonb normalises
+     * {@code 1.0E7} to {@code 10000000}, which would read as a long).
+     */
+    static String plain(double d) {
+        String s = java.math.BigDecimal.valueOf(d).toPlainString();
+        return s.indexOf('.') >= 0 ? s : s + ".0";
     }
 
     private static void quote(StringBuilder sb, String s) {

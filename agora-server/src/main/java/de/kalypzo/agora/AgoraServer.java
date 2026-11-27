@@ -18,6 +18,7 @@ import de.kalypzo.agora.holder.HolderRegistry;
 import de.kalypzo.agora.audit.AuditIngest;
 import de.kalypzo.agora.audit.AuditPartitions;
 import de.kalypzo.agora.audit.AuditStore;
+import de.kalypzo.agora.audit.TimelineService;
 import de.kalypzo.agora.grpc.AuditEndpoints;
 import de.kalypzo.agora.jobs.AuditPartitionJob;
 import de.kalypzo.agora.jobs.ExpireJob;
@@ -193,7 +194,9 @@ public final class AgoraServer {
             DataEndpoints.registerWrites(service, new WriteService(ds, changes));
             IndexService indexes = new IndexService(ds);
             DataEndpoints.registerIndexes(service, indexes);
-            AuditEndpoints.register(service, new AuditIngest(new AuditStore(ds), Clock.systemUTC()));
+            AuditStore auditStore = new AuditStore(ds);
+            AuditEndpoints.register(service, new AuditIngest(auditStore, Clock.systemUTC()));
+            AuditEndpoints.timeline(service, new TimelineService(auditStore, ds, Clock.systemUTC()));
             service.onConnect(new NodeStream(nodes, nodeMessages, presence, Clock.systemUTC(),
                     scheduler, config.paperWelcomeDelay(), NodeSession.DEFAULT_QUEUE_LIMIT));
             Server server = NettyServerBuilder.forPort(config.port())

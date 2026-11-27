@@ -53,6 +53,11 @@ class AgoraServerTest {
                         .build()).getFound()).isFalse();
                 // A-17: AppendAudit is wired in (an empty bundle is accepted, not UNIMPLEMENTED).
                 stub.appendAudit(de.kalypzo.agora.proto.v1.AuditBundle.getDefaultInstance());
+                // A-18: Timeline is wired in (first page of an unknown player: empty, audit_view written).
+                assertThat(stub.timeline(de.kalypzo.agora.proto.v1.TimelineRequest.newBuilder()
+                        .setPlayer(com.google.protobuf.ByteString.copyFrom(new byte[16]))
+                        .setViewer(de.kalypzo.agora.proto.v1.AuditViewer.newBuilder().setName("console"))
+                        .build()).getEntriesCount()).isZero();
                 // A-09: the Connect stream is wired in (paperWelcomeDelay 0 → Welcome at once).
                 LinkedBlockingQueue<ServiceMessage> received = new LinkedBlockingQueue<>();
                 StreamObserver<NodeMessage> conn = AgoraGrpc.newStub(ch)
