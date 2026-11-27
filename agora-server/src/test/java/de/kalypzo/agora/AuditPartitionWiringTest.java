@@ -40,7 +40,7 @@ class AuditPartitionWiringTest {
                 } finally {
                     scheduler.shutdownNow();
                 }
-                assertThat(countAtSchedule.get()).isEqualTo(3);
+                assertThat(countAtSchedule.get()).isEqualTo(4); // yesterday, today, +1, +2 (R54)
             }
         }
     }

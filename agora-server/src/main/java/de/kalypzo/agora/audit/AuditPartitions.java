@@ -50,13 +50,16 @@ public final class AuditPartitions {
         st.execute("SELECT pg_advisory_xact_lock(" + LOCK_KEY + ")");
     }
 
-    /** Creates the partitions for today ... today + {@code daysAhead} (UTC) that are missing. */
+    /**
+     * Creates the missing partitions for yesterday ... today + {@code daysAhead} (UTC). Yesterday is included (R54)
+     * because Agora accepts entries up to 24 h old, which on a fresh Agora would otherwise hit a missing partition.
+     */
     public void ensure(int daysAhead) {
         LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
             c.setAutoCommit(false);
             lock(st);
-            for (int i = 0; i <= daysAhead; i++) {
+            for (int i = -1; i <= daysAhead; i++) {
                 LocalDate day = today.plusDays(i);
                 st.execute("CREATE TABLE IF NOT EXISTS " + PREFIX + DAY.format(day)
                         + " PARTITION OF pantheon_audit FOR VALUES FROM ('" + bound(day) + "') TO ('"

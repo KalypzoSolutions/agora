@@ -71,10 +71,11 @@ class AuditPartitionsTest {
     }
 
     @Test
-    void ensureCreatesTodayAndTwoAhead() throws Exception {
+    void ensureCreatesYesterdayTodayAndTwoAhead() throws Exception {
+        // R54: yesterday too, so a valid entry up to 24 h old never hits a missing partition on a fresh Agora
         new AuditPartitions(ds, at("2026-11-27T12:00:00Z")).ensure(2);
-        assertThat(partitions())
-                .containsExactly("pantheon_audit_20261127", "pantheon_audit_20261128", "pantheon_audit_20261129");
+        assertThat(partitions()).containsExactly("pantheon_audit_20261126", "pantheon_audit_20261127",
+                "pantheon_audit_20261128", "pantheon_audit_20261129");
     }
 
     @Test
@@ -82,7 +83,7 @@ class AuditPartitionsTest {
         AuditPartitions p = new AuditPartitions(ds, at("2026-11-27T12:00:00Z"));
         p.ensure(2);
         p.ensure(2);
-        assertThat(partitions()).hasSize(3);
+        assertThat(partitions()).hasSize(4);
     }
 
     @Test
@@ -165,6 +166,6 @@ class AuditPartitionsTest {
             holder.rollback();
         }
         p.ensure(2); // lock free again
-        assertThat(partitions()).hasSize(3);
+        assertThat(partitions()).hasSize(4);
     }
 }
