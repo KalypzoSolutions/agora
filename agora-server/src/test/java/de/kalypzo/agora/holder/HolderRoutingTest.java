@@ -459,6 +459,53 @@ class HolderRoutingTest {
         assertThat(holders.holdersOf(gap)).containsExactly("lobby-01");
     }
 
+    private UUID goneWithGapHolder() throws Exception {
+        Client a = connect("lobby-01", "tok-a");
+        UUID gap = UUID.randomUUID();
+        CountDownLatch gate = new CountDownLatch(1);
+        server.nodes().serialize("lobby-01", () -> {
+            try {
+                gate.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        clock.set(T0.plusSeconds(1));
+        a.cancel();
+        await().atMost(Duration.ofSeconds(5)).until(() -> server.nodes().get("lobby-01").isEmpty());
+        clock.set(T0.plusSeconds(2));
+        loadPlayer("lobby-01", "tok-a", gap);
+        gate.countDown();
+        server.nodes().serialize("lobby-01", () -> {}).get(5, TimeUnit.SECONDS);
+        assertThat(holders.holdersOf(gap)).containsExactly("lobby-01");
+        return gap;
+    }
+
+    @Test
+    void gapHolderOfNodeThatNeverReturnsIsSwept() throws Exception {
+        start();
+        UUID gap = goneWithGapHolder();
+
+        clock.set(T0.plusSeconds(2).plus(HolderRegistry.GRACE).minusMillis(1));
+        holders.sweepOrphans();
+        assertThat(holders.holdersOf(gap)).containsExactly("lobby-01"); // still within the grace
+
+        clock.set(T0.plusSeconds(2).plus(HolderRegistry.GRACE));
+        holders.sweepOrphans();
+        assertThat(holders.holdersOf(gap)).isEmpty();
+    }
+
+    @Test
+    void gapHolderOfReconnectedNodeIsNotSwept() throws Exception {
+        start();
+        UUID gap = goneWithGapHolder();
+        connect("lobby-01", "tok-a");
+
+        clock.set(T0.plusSeconds(2).plus(HolderRegistry.GRACE).plusSeconds(60));
+        holders.sweepOrphans();
+        assertThat(holders.holdersOf(gap)).containsExactly("lobby-01");
+    }
+
     @Test
     void sixArgStartRoutesChanges() throws Exception {
         AgoraService service = new AgoraService();

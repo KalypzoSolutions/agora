@@ -80,6 +80,8 @@ public final class HolderRegistry implements HolderSink, ChangePublisher, HelloL
     private final Map<UUID, Set<String>> playerHolders = new HashMap<>(); // guarded by lock
     private final Map<String, Set<String>> storeWatchers = new HashMap<>(); // guarded by lock
     private final Map<String, Instant> sessionEnds = new HashMap<>(); // nodeId -> end of its last session, by lock
+    /** Nodes that went gone with gap entries left over: nodeId -> time of node-gone (guarded by lock). */
+    private final Map<String, Instant> orphaned = new HashMap<>();
     private Subscription installation; // guarded by this
     private NodeMessageDispatcher installedOn; // guarded by this
 
@@ -268,8 +270,38 @@ public final class HolderRegistry implements HolderSink, ChangePublisher, HelloL
             h.unwatchedStores.clear();
             kept = h.players.size() + h.stores.size();
             dropIfEmpty(nodeId);
+            if (kept > 0) orphaned.put(nodeId, clock.instant());
         }
         LOG.debug("Node '{}' is gone, its holder entries were removed ({} newer ones kept)", nodeId, kept);
+    }
+
+    /**
+     * Removes the gap entries (see node-gone) of nodes that did not open a session again within {@link #GRACE} after
+     * node-gone; for a node that is connected again the record is dropped (its Hello/Heartbeat reconciles). Called
+     * periodically by the job scheduler.
+     */
+    public void sweepOrphans() {
+        Instant now = clock.instant();
+        synchronized (lock) {
+            for (Iterator<Map.Entry<String, Instant>> it = orphaned.entrySet().iterator(); it.hasNext(); ) {
+                Map.Entry<String, Instant> e = it.next();
+                String nodeId = e.getKey();
+                if (nodes.get(nodeId).isPresent()) {
+                    it.remove();
+                    continue;
+                }
+                if (e.getValue().plus(GRACE).isAfter(now)) continue;
+                it.remove();
+                Holds h = byNode.get(nodeId);
+                if (h == null) continue;
+                for (UUID p : h.players.keySet()) unindexPlayer(nodeId, p);
+                for (String s : h.stores.keySet()) unindexStore(nodeId, s);
+                h.players.clear();
+                h.stores.clear();
+                dropIfEmpty(nodeId);
+                LOG.debug("Node '{}' did not return, its leftover holder entries were removed", nodeId);
+            }
+        }
     }
 
     // ---------- routing ----------
