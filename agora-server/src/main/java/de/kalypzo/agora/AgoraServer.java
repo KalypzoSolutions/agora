@@ -15,6 +15,8 @@ import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
 import de.kalypzo.agora.grpc.PresenceEndpoints;
 import de.kalypzo.agora.holder.HolderRegistry;
+import de.kalypzo.agora.jobs.ExpireJob;
+import de.kalypzo.agora.jobs.IdempotencyCleanupJob;
 import de.kalypzo.agora.node.NodeMessageDispatcher;
 import de.kalypzo.agora.node.NodeRegistry;
 import de.kalypzo.agora.node.NodeSession;
@@ -171,6 +173,7 @@ public final class AgoraServer {
         });
         try {
             Migrations.migrate(ds);
+            scheduleJobs(scheduler, ds, changes);
             DataEndpoints.register(service, new ReadService(ds, holders));
             DataEndpoints.registerWrites(service, new WriteService(ds, changes));
             IndexService indexes = new IndexService(ds);
@@ -199,6 +202,27 @@ public final class AgoraServer {
             ds.close();
             throw e;
         }
+    }
+
+    /** Background jobs on the scheduler (A-13) and the sweep of orphaned holder entries (A-10); failures are logged. */
+    private static void scheduleJobs(ScheduledExecutorService scheduler, HikariDataSource ds, ChangePublisher changes) {
+        Clock clock = Clock.systemUTC();
+        scheduleLogged(scheduler, new ExpireJob(ds, changes, clock), ExpireJob.INTERVAL, "expire");
+        scheduleLogged(scheduler, new IdempotencyCleanupJob(ds, clock), IdempotencyCleanupJob.INTERVAL,
+                "idempotency cleanup");
+        if (changes instanceof HolderRegistry registry) {
+            scheduleLogged(scheduler, registry::sweepOrphans, HolderRegistry.GRACE, "holder sweep");
+        }
+    }
+
+    private static void scheduleLogged(ScheduledExecutorService scheduler, Runnable job, Duration interval, String name) {
+        scheduler.scheduleWithFixedDelay(() -> {
+            try {
+                job.run();
+            } catch (RuntimeException e) {
+                LOG.error("Background job '{}' failed", name, e);
+            }
+        }, interval.toMillis(), interval.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     public int port() {
