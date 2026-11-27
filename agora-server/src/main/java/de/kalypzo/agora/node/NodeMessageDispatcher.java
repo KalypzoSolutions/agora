@@ -56,6 +56,7 @@ public final class NodeMessageDispatcher {
             case LOCATION_REPLY -> () -> l.onLocationReply(s, m.getLocationReply());
             case SEND_DELIVERY -> () -> l.onSendDelivery(s, m.getSendDelivery());
             case RELEASE_PLAYER -> () -> l.onReleasePlayer(s, m.getReleasePlayer());
+            case BARRIER -> () -> l.onBarrier(s, m.getBarrier());
             case PAYLOAD_NOT_SET -> () -> {};
         };
         call.run();

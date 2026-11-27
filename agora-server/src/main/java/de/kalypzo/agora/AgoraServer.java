@@ -28,6 +28,7 @@ import de.kalypzo.agora.jobs.IdempotencyCleanupJob;
 import de.kalypzo.agora.node.NodeMessageDispatcher;
 import de.kalypzo.agora.node.NodeRegistry;
 import de.kalypzo.agora.node.NodeSession;
+import de.kalypzo.agora.node.StreamBarrier;
 import de.kalypzo.agora.presence.PresenceService;
 import de.kalypzo.agora.presence.PresenceSnapshot;
 import de.kalypzo.agora.index.IndexService;
@@ -185,6 +186,8 @@ public final class AgoraServer {
             PresenceSnapshot presence,
             ChangePublisher changes) {
         NodeTokens tokens = NodeTokens.load(config.tokensFile());
+        // R45: Barrier -> BarrierAck on the lane, i.e. after every earlier message of the stream was handled.
+        StreamBarrier.install(nodeMessages);
         HealthStatusManager health = new HealthStatusManager();
         health.setStatus("", ServingStatus.NOT_SERVING);
         HikariDataSource ds = Database.open(config);

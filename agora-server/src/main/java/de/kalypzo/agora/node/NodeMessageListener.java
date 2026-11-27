@@ -1,5 +1,6 @@
 package de.kalypzo.agora.node;
 
+import de.kalypzo.agora.proto.v1.Barrier;
 import de.kalypzo.agora.proto.v1.Heartbeat;
 import de.kalypzo.agora.proto.v1.Hello;
 import de.kalypzo.agora.proto.v1.KickResult;
@@ -39,4 +40,6 @@ public interface NodeMessageListener {
     default void onSendDelivery(NodeSession session, SendDelivery delivery) {}
 
     default void onReleasePlayer(NodeSession session, ReleasePlayer release) {}
+
+    default void onBarrier(NodeSession session, Barrier barrier) {}
 }

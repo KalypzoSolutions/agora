@@ -14,6 +14,8 @@ import de.kalypzo.agora.grpc.PresenceEndpoints;
 import de.kalypzo.agora.proto.v1.AgoraGrpc;
 import de.kalypzo.agora.proto.v1.ApplyRequest;
 import de.kalypzo.agora.proto.v1.ApplyResponse;
+import de.kalypzo.agora.proto.v1.Barrier;
+import de.kalypzo.agora.proto.v1.BarrierAck;
 import de.kalypzo.agora.proto.v1.DocChanged;
 import de.kalypzo.agora.proto.v1.DocRef;
 import de.kalypzo.agora.proto.v1.FieldOp;
@@ -196,6 +198,32 @@ class HolderRoutingTest {
         apply("lobby-02", "tok-b", key(), player(marker), inc(COINS, 1));
         List<DocChanged> seen = a.docChangedUntil(e -> e.getRef().equals(playerRow(marker, "economy")));
         assertThat(seen).noneMatch(e -> e.getRef().getPlayerRow().getPlayer().equals(p.toString()));
+    }
+
+    /** R45: the ack of a Barrier comes after every earlier message of the stream was handled (here: a release). */
+    @Test
+    void barrierAckFollowsEarlierRelease() throws Exception {
+        start();
+        Client a = connect("lobby-01", "tok-a");
+        UUID p = UUID.randomUUID();
+        loadPlayer("lobby-01", "tok-a", p);
+        assertThat(holders.holdersOf(p)).containsExactly("lobby-01");
+
+        a.send(NodeMessage.newBuilder().setReleasePlayer(ReleasePlayer.newBuilder().setPlayer(p.toString())).build());
+        a.send(NodeMessage.newBuilder().setBarrier(Barrier.newBuilder().setRequestId("b-1")).build());
+
+        BarrierAck ack = a.nextMatching(ServiceMessage::hasBarrierAck).getBarrierAck();
+        assertThat(ack.getRequestId()).isEqualTo("b-1");
+        assertThat(holders.holdersOf(p)).isEmpty();
+    }
+
+    /** The default start path answers barriers as well. */
+    @Test
+    void defaultStartAnswersBarrier() throws Exception {
+        startDefault();
+        Client a = connect("lobby-01", "tok-a");
+        a.send(NodeMessage.newBuilder().setBarrier(Barrier.newBuilder().setRequestId("b-2")).build());
+        assertThat(a.nextMatching(ServiceMessage::hasBarrierAck).getBarrierAck().getRequestId()).isEqualTo("b-2");
     }
 
     @Test

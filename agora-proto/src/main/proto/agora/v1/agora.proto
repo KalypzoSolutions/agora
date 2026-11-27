@@ -145,6 +145,7 @@ message NodeMessage {
     LocationReply location_reply = 8;
     SendDelivery send_delivery = 9;
     ReleasePlayer release_player = 10;
+    Barrier barrier = 11;                                                           // R45
   }
 }
 message ServiceMessage {
@@ -155,6 +156,7 @@ message ServiceMessage {
     Deliver deliver = 4;
     LocationRequest location_request = 5;
     KickPlayer kick_player = 6;
+    BarrierAck barrier_ack = 7;                                                     // R45
   }
 }
 message Hello { string node_id = 1; NodeKind kind = 2; repeated string held_players = 3;
@@ -163,6 +165,9 @@ message Heartbeat { repeated string held_players = 1; repeated PresenceEntry pla
 message WatchStore     { string store = 1; }
 message UnwatchStore   { string store = 1; }
 message ReleasePlayer  { string player = 1; }                                       // E3
+// R45: stream barrier. Agora answers with BarrierAck(request_id) once every earlier message of this stream was handled.
+message Barrier        { string request_id = 1; }
+message BarrierAck     { string request_id = 1; }
 message PlayerSwitched { string player = 1; string server = 2; }
 message PlayerLeft     { string player = 1; }
 message KickPlayer     { string request_id = 1; string player = 2; }
