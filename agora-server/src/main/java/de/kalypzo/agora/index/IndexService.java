@@ -31,7 +31,7 @@ public final class IndexService {
     private static final String UNIQUE_VIOLATION = "23505";
 
     private final DataSource ds;
-    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
+    private final ExecutorService executor = Executors.newFixedThreadPool(4, r -> {
         Thread t = new Thread(r, "agora-index");
         t.setDaemon(true);
         return t;
@@ -40,6 +40,11 @@ public final class IndexService {
 
     public IndexService(DataSource ds) {
         this.ds = ds;
+    }
+
+    /** Stops accepting builds; a running {@code CREATE INDEX} is interrupted. */
+    public void close() {
+        executor.shutdownNow();
     }
 
     /**
@@ -72,31 +77,41 @@ public final class IndexService {
         else future.completeExceptionally(error);
     }
 
+    /**
+     * The index covers the ranking query {@code ORDER BY <expr> DESC NULLS LAST, <tie-break> ASC} (R39): the tie-break
+     * is {@code id COLLATE "C"} for stores and {@code player} for players. ASC sorts are not index-backed. A unique
+     * index covers the expression alone (a tie-break column would make every entry unique).
+     */
     static String definition(String name, IndexDeclaration decl) {
         String expr = FieldExpr.read("", decl.getField()).sql();
         String table;
+        String tieBreak;
         String predicate;
         switch (decl.getTarget().getTargetCase()) {
             case PLAYERS -> {
                 table = "pantheon_player";
+                tieBreak = "player ASC";
                 predicate = "namespace = " + SqlLiteral.namespace(decl.getField().getNamespace());
             }
             case STORE -> {
                 table = "pantheon_doc";
+                tieBreak = "id COLLATE \"C\" ASC";
                 predicate = "store = " + SqlLiteral.store(decl.getTarget().getStore());
             }
             default -> throw new IllegalArgumentException("index has no target");
         }
+        String columns = decl.getUnique() ? "((" + expr + "))" : "((" + expr + ") DESC NULLS LAST, " + tieBreak + ")";
         return "CREATE " + (decl.getUnique() ? "UNIQUE " : "") + "INDEX CONCURRENTLY IF NOT EXISTS " + name + " ON "
-                + table + " ((" + expr + ")) WHERE " + predicate;
+                + table + " " + columns + " WHERE " + predicate;
     }
 
     private void build(String name, String definition) throws SQLException {
         try (Connection c = ds.getConnection()) {
             c.setAutoCommit(true); // CONCURRENTLY cannot run inside a transaction
-            String status = status(c, name);
-            if ("ready".equals(status)) return;
-            // New, failed, or interrupted while pending: (re)start from a clean state, created_at stays.
+            String[] current = state(c, name);
+            if (current != null && "ready".equals(current[0]) && definition.equals(current[1])) return;
+            // New, failed, interrupted while pending, or a changed definition (R40): (re)build from a clean
+            // state, created_at stays.
             try (PreparedStatement ps = c.prepareStatement(
                     "INSERT INTO pantheon_index (name, definition, status) VALUES (?, ?, 'pending') "
                             + "ON CONFLICT (name) DO UPDATE SET definition = EXCLUDED.definition, status = 'pending', "
@@ -123,11 +138,12 @@ public final class IndexService {
         }
     }
 
-    private static String status(Connection c, String name) throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement("SELECT status FROM pantheon_index WHERE name = ?")) {
+    /** {status, definition} of the declared index, or null. */
+    private static String[] state(Connection c, String name) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT status, definition FROM pantheon_index WHERE name = ?")) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
+                return rs.next() ? new String[] {rs.getString(1), rs.getString(2)} : null;
             }
         }
     }

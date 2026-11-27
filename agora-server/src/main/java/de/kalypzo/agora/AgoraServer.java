@@ -32,18 +32,21 @@ public final class AgoraServer {
     private final AgoraService service;
     private final HealthStatusManager health;
     private final Server server;
+    private final IndexService indexes;
 
     private AgoraServer(
             AgoraConfig config,
             HikariDataSource dataSource,
             AgoraService service,
             HealthStatusManager health,
-            Server server) {
+            Server server,
+            IndexService indexes) {
         this.config = config;
         this.dataSource = dataSource;
         this.service = service;
         this.health = health;
         this.server = server;
+        this.indexes = indexes;
     }
 
     /** Starts with an already built service (cards register their handlers on it first). */
@@ -64,7 +67,8 @@ public final class AgoraServer {
         try {
             Migrations.migrate(ds);
             DataEndpoints.register(service, new ReadService(ds, holders));
-            DataEndpoints.registerIndexes(service, new IndexService(ds));
+            IndexService indexes = new IndexService(ds);
+            DataEndpoints.registerIndexes(service, indexes);
             Server server = NettyServerBuilder.forPort(config.port())
                     .keepAliveTime(10, TimeUnit.SECONDS)
                     .permitKeepAliveTime(5, TimeUnit.SECONDS)
@@ -77,7 +81,7 @@ public final class AgoraServer {
             health.setStatus("", ServingStatus.SERVING);
             health.setStatus("agora.v1.Agora", ServingStatus.SERVING);
             LOG.info("Agora listening on port {}", server.getPort());
-            return new AgoraServer(config, ds, service, health, server);
+            return new AgoraServer(config, ds, service, health, server, indexes);
         } catch (IOException e) {
             ds.close();
             throw new UncheckedIOException(e);
@@ -119,6 +123,7 @@ public final class AgoraServer {
             server.shutdownNow();
             Thread.currentThread().interrupt();
         } finally {
+            indexes.close();
             dataSource.close();
         }
     }

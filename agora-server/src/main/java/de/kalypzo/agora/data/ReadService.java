@@ -106,14 +106,7 @@ public final class ReadService {
         try (Connection c = ds.getConnection()) {
             switch (target.getTargetCase()) {
                 case PLAYERS -> {
-                    PlayerFrom from = PlayerFrom.of(spec.getWhereList(), spec.getSortList());
-                    SqlFragment order = SortSql.orderBy(from::aliasFor, spec.getSortList(), "p0.player");
-                    SqlFragment sql = SqlFragment.concat(
-                            SqlFragment.of("SELECT p0.player "),
-                            from.fromWhere(),
-                            SqlFragment.of(" "),
-                            order,
-                            SqlFragment.of(" LIMIT " + limit + " OFFSET " + spec.getOffset()));
+                    SqlFragment sql = playerQuerySql(spec, limit);
                     List<UUID> hits = new ArrayList<>();
                     try (PreparedStatement ps = prepare(c, sql.sql(), sql.params()); ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) hits.add(rs.getObject(1, UUID.class));
@@ -127,14 +120,7 @@ public final class ReadService {
                 }
                 case STORE -> {
                     String store = target.getStore();
-                    SqlFragment where = storeWhere(store, spec.getWhereList());
-                    SqlFragment order = SortSql.orderBy(f -> "d", spec.getSortList(), "d.id", true);
-                    SqlFragment sql = SqlFragment.concat(
-                            SqlFragment.of("SELECT d.id, d.data::text, d.version FROM pantheon_doc d WHERE "),
-                            where,
-                            SqlFragment.of(" "),
-                            order,
-                            SqlFragment.of(" LIMIT " + limit + " OFFSET " + spec.getOffset()));
+                    SqlFragment sql = storeQuerySql(store, spec, limit);
                     try (PreparedStatement ps = prepare(c, sql.sql(), sql.params()); ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
                             Row row = docRow(store, rs);
@@ -148,6 +134,30 @@ public final class ReadService {
             }
         }
         return out.build();
+    }
+
+    /** The SQL of a PLAYERS query (public so the index tests can EXPLAIN exactly what is executed). */
+    public static SqlFragment playerQuerySql(QuerySpec spec, int limit) {
+        PlayerFrom from = PlayerFrom.of(spec.getWhereList(), spec.getSortList());
+        SqlFragment order = SortSql.orderBy(from::aliasFor, spec.getSortList(), "p0.player");
+        return SqlFragment.concat(
+                SqlFragment.of("SELECT p0.player "),
+                from.fromWhere(),
+                SqlFragment.of(" "),
+                order,
+                SqlFragment.of(" LIMIT " + limit + " OFFSET " + spec.getOffset()));
+    }
+
+    /** The SQL of a STORE query (public so the index tests can EXPLAIN exactly what is executed). */
+    public static SqlFragment storeQuerySql(String store, QuerySpec spec, int limit) {
+        SqlFragment where = storeWhere(store, spec.getWhereList());
+        SqlFragment order = SortSql.orderBy(f -> "d", spec.getSortList(), "d.id", true);
+        return SqlFragment.concat(
+                SqlFragment.of("SELECT d.id, d.data::text, d.version FROM pantheon_doc d WHERE "),
+                where,
+                SqlFragment.of(" "),
+                order,
+                SqlFragment.of(" LIMIT " + limit + " OFFSET " + spec.getOffset()));
     }
 
     public CountResponse count(CountRequest request) throws SQLException {

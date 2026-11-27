@@ -5,9 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import de.kalypzo.agora.data.ReadService;
 import de.kalypzo.agora.db.Migrations;
 import de.kalypzo.agora.proto.v1.*;
-import de.kalypzo.agora.sql.SortSql;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -174,6 +174,17 @@ class IndexServiceTest {
         assertThat(strings("SELECT 1 FROM pantheon_index")).hasSize(1);
     }
 
+    static String explain(String sql) throws SQLException {
+        StringBuilder plan = new StringBuilder();
+        try (Connection c = ds.getConnection(); Statement s = c.createStatement()) {
+            s.execute("SET enable_seqscan = off");
+            try (ResultSet rs = s.executeQuery("EXPLAIN " + sql)) {
+                while (rs.next()) plan.append(rs.getString(1)).append('\n');
+            }
+        }
+        return plan.toString();
+    }
+
     @Test
     void sortQueryUsesIndex() throws Exception {
         FieldSpec score = field("lobby:clans", "score", ScalarType.LONG, lv(0));
@@ -184,19 +195,49 @@ class IndexServiceTest {
         name(service.declare(store("lobby:clans", score, false)));
         exec("ANALYZE pantheon_doc");
 
-        // same shape as ReadService.query for a store target
-        String order = SortSql.orderBy(f -> "d", List.of(Sort.newBuilder().setField(score).build()), "d.id", true)
-                .sql();
-        String sql = "SELECT d.id, d.data::text, d.version FROM pantheon_doc d WHERE d.store = 'lobby:clans' "
-                + "AND (d.expires_at IS NULL OR d.expires_at > now()) " + order + " LIMIT 10";
-        StringBuilder plan = new StringBuilder();
-        try (Connection c = ds.getConnection(); Statement s = c.createStatement()) {
-            s.execute("SET enable_seqscan = off");
-            try (ResultSet rs = s.executeQuery("EXPLAIN " + sql)) {
-                while (rs.next()) plan.append(rs.getString(1)).append('\n');
-            }
-        }
-        assertThat(plan.toString()).contains("pantheon_doc_lobby_clans_score");
+        QuerySpec spec = QuerySpec.newBuilder().setLimit(10)
+                .addSort(Sort.newBuilder().setField(score).setDescending(true)).build();
+        String plan = explain(ReadService.storeQuerySql("lobby:clans", spec, 10).sql());
+        assertThat(plan).contains("pantheon_doc_lobby_clans_score").doesNotContain("Sort");
+
+        QuerySpec asc = QuerySpec.newBuilder().setLimit(10).addSort(Sort.newBuilder().setField(score)).build();
+        assertThat(explain(ReadService.storeQuerySql("lobby:clans", asc, 10).sql())).contains("Sort");
+    }
+
+    @Test
+    void playerDescQueryUsesIndex() throws Exception {
+        FieldSpec coins = field("economy", "coins", ScalarType.LONG, lv(0));
+        exec("INSERT INTO pantheon_player(player, namespace, data) SELECT gen_random_uuid(), 'pantheon', "
+                + "jsonb_build_object('name', 'p' || g) FROM generate_series(1, 5000) g");
+        exec("INSERT INTO pantheon_player(player, namespace, data) SELECT player, 'economy', "
+                + "jsonb_build_object('coins', (random() * 100000)::bigint) FROM pantheon_player "
+                + "WHERE namespace = 'pantheon'");
+        name(service.declare(players(coins, false)));
+        exec("ANALYZE pantheon_player");
+
+        QuerySpec spec = QuerySpec.newBuilder().setLimit(10)
+                .addSort(Sort.newBuilder().setField(coins).setDescending(true)).build();
+        String plan = explain(ReadService.playerQuerySql(spec, 10).sql());
+        // E9: ORDER BY mixes p_economy (expression) and p0.player (tie-break) over a LEFT JOIN, so Postgres cannot
+        // deliver the order from the index (Sort node stays); it does use the index to read the namespace rows.
+        assertThat(plan).contains("pantheon_player_economy_coins");
+    }
+
+    @Test
+    void changedDefinitionRebuildsReadyIndex() throws Exception {
+        exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{\"owner\":\"x\"}')");
+        FieldSpec owner = field("lobby:clans", "owner", ScalarType.STRING, null);
+        name(service.declare(store("lobby:clans", owner, false)));
+        assertThat(one("SELECT indexdef FROM pg_indexes WHERE indexname = 'pantheon_doc_lobby_clans_owner'"))
+                .doesNotContain("UNIQUE");
+
+        name(service.declare(store("lobby:clans", owner, true)));
+        assertThat(one("SELECT indexdef FROM pg_indexes WHERE indexname = 'pantheon_doc_lobby_clans_owner'"))
+                .contains("UNIQUE");
+        assertThat(one("SELECT definition FROM pantheon_index WHERE name = 'pantheon_doc_lobby_clans_owner'"))
+                .contains("UNIQUE");
+        assertThatThrownBy(() -> exec("INSERT INTO pantheon_doc(store, id, data) "
+                + "VALUES ('lobby:clans','b','{\"owner\":\"x\"}')")).hasMessageContaining("duplicate key");
     }
 
     @Test
