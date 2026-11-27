@@ -150,4 +150,26 @@ class JobsTest {
 
         assertThat(column("SELECT idempotency_key FROM pantheon_idempotency")).containsExactly("young");
     }
+
+    @Test
+    void cleanupDeletesMoreRowsThanOneBatch() throws Exception {
+        // A-13: bounded batches (each its own short statement) until a batch comes back short.
+        for (int i = 0; i < 7; i++) insertKey("old" + i, NOW.minus(Duration.ofHours(25)));
+        insertKey("young", NOW.minus(Duration.ofHours(1)));
+        java.util.concurrent.atomic.AtomicInteger connections = new java.util.concurrent.atomic.AtomicInteger();
+        javax.sql.DataSource counting = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {javax.sql.DataSource.class}, (proxy, m, args) -> {
+                    if (m.getName().equals("getConnection")) connections.incrementAndGet();
+                    try {
+                        return m.invoke(ds, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+
+        new IdempotencyCleanupJob(counting, clock, 3).run();
+
+        assertThat(column("SELECT idempotency_key FROM pantheon_idempotency")).containsExactly("young");
+        assertThat(connections).hasValue(3); // 3 + 3 + 1
+    }
 }
