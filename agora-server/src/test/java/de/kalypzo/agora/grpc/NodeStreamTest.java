@@ -327,50 +327,145 @@ class NodeStreamTest {
         assertThat(hellos.getFirst().getPlayersList()).containsExactly(ALICE);
     }
 
-    @Test
-    void nodeGoneOfOldSessionRacingNewHelloLeavesNewStateUntouched() throws Exception {
-        start();
-        // A downstream component in the style of A-10: holders per node, set by Hello, removed by node-gone.
+    /** A downstream component in the style of A-10: holders per node, set by Hello, removed by node-gone. */
+    Map<String, List<String>> holderStateLikeA10(List<Boolean> supersededSeen) {
         Map<String, List<String>> holders = new ConcurrentHashMap<>();
         dispatcher.addHelloListener((s, h) -> holders.put(s.nodeId(), List.copyOf(h.getHeldPlayersList())));
-        List<Boolean> supersededSeen = new CopyOnWriteArrayList<>();
         registry.onNodeGone(s -> {
             supersededSeen.add(registry.isSuperseded(s));
             if (!registry.isSuperseded(s)) holders.remove(s.nodeId());
         });
+        return holders;
+    }
 
-        Client old = client("paper-1", "tok-paper", -1);
-        old.send(NodeMessage.newBuilder().setHello(Hello.newBuilder()
-                .setNodeId("paper-1").setKind(NodeKind.PAPER).addHeldPlayers("old-player")).build());
-        assertThat(old.next().hasWelcome()).isTrue();
-        NodeSession oldSession = registry.get("paper-1").orElseThrow();
+    Client paperHello(String player) {
+        Client c = client("paper-1", "tok-paper", -1);
+        c.send(NodeMessage.newBuilder().setHello(Hello.newBuilder()
+                .setNodeId("paper-1").setKind(NodeKind.PAPER).addHeldPlayers(player)).build());
+        return c;
+    }
 
-        // Hold the lane of paper-1, so node-gone(old) is queued but cannot run yet.
+    CountDownLatch blockLane(String nodeId) {
         CountDownLatch release = new CountDownLatch(1);
-        registry.serialize("paper-1", () -> {
+        registry.serialize(nodeId, () -> {
             try {
                 release.await(5, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         });
+        return release;
+    }
+
+    @Test
+    void nodeGoneOfOldSessionRacingNewHelloLeavesNewStateUntouched() throws Exception {
+        start();
+        List<Boolean> supersededSeen = new CopyOnWriteArrayList<>();
+        Map<String, List<String>> holders = holderStateLikeA10(supersededSeen);
+        Client old = paperHello("old-player");
+        assertThat(old.next().hasWelcome()).isTrue();
+        NodeSession oldSession = registry.get("paper-1").orElseThrow();
+
+        // Lane held: the new Hello is queued first, then the old stream ends (node-gone queued behind the Hello).
+        CountDownLatch release = blockLane("paper-1");
+        Client fresh = paperHello("new-player");
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.pending("paper-1") == 2);
         old.cancel();
         await().atMost(Duration.ofSeconds(5)).until(() -> registry.get("paper-1").isEmpty());
-
-        // The node reconnects before node-gone(old) ran: no previous session to replace.
-        Client fresh = client("paper-1", "tok-paper", -1);
-        fresh.send(NodeMessage.newBuilder().setHello(Hello.newBuilder()
-                .setNodeId("paper-1").setKind(NodeKind.PAPER).addHeldPlayers("new-player")).build());
-        await().atMost(Duration.ofSeconds(5)).until(() -> registry.get("paper-1").isPresent());
-        assertThat(registry.isSuperseded(oldSession)).isTrue();
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.pending("paper-1") == 3);
 
         release.countDown();
         assertThat(fresh.next().hasWelcome()).isTrue();
         flush("paper-1");
+        assertThat(registry.isSuperseded(oldSession)).isTrue();
         // The superseded node-gone was dropped (R2); a listener that defers work can check isSuperseded itself.
         assertThat(gone).isEmpty();
         assertThat(supersededSeen).isEmpty();
         assertThat(holders).containsExactly(Map.entry("paper-1", List.of("new-player")));
+    }
+
+    @Test
+    void nodeGoneOfOldSessionBeforeNewHelloIsAppliedFirst() throws Exception {
+        start();
+        List<Boolean> supersededSeen = new CopyOnWriteArrayList<>();
+        Map<String, List<String>> holders = holderStateLikeA10(supersededSeen);
+        Client old = paperHello("old-player");
+        assertThat(old.next().hasWelcome()).isTrue();
+
+        // Lane held: the old stream ends first (node-gone queued), then the node reconnects.
+        CountDownLatch release = blockLane("paper-1");
+        old.cancel();
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.pending("paper-1") == 2);
+        Client fresh = paperHello("new-player");
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.pending("paper-1") == 3);
+
+        release.countDown();
+        assertThat(fresh.next().hasWelcome()).isTrue();
+        flush("paper-1");
+        // Lane order: node-gone(old) cleans up, then the new Hello restores; the new state is untouched.
+        assertThat(supersededSeen).containsExactly(false);
+        assertThat(gone).hasSize(1);
+        assertThat(holders).containsExactly(Map.entry("paper-1", List.of("new-player")));
+    }
+
+    @Test
+    void stalledListenerStopsFurtherInboundDelivery() throws Exception {
+        start();
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1);
+        List<Heartbeat> beats = new CopyOnWriteArrayList<>();
+        dispatcher.addListener(new NodeMessageListener() {
+            @Override
+            public void onHeartbeat(NodeSession s, Heartbeat m) {
+                beats.add(m);
+                entered.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        Client c = client("velocity-1", "tok-velocity", -1);
+        c.hello("velocity-1", NodeKind.VELOCITY);
+        assertThat(c.next().hasWelcome()).isTrue();
+        for (int i = 0; i < 50; i++) {
+            c.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.getDefaultInstance()).build());
+        }
+        assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+        Thread.sleep(200); // give an (incorrectly) auto-requesting server time to queue more
+        assertThat(registry.pending("velocity-1")).isEqualTo(1); // only the stalled task, nothing queued behind it
+        assertThat(beats).hasSize(1);
+
+        release.countDown();
+        await().atMost(Duration.ofSeconds(5)).until(() -> beats.size() == 50);
+    }
+
+    @Test
+    void messagesQueuedBeforeShutdownAreSkippedAndCloseWaitsForLanes() throws Exception {
+        start();
+        List<Heartbeat> beats = new CopyOnWriteArrayList<>();
+        dispatcher.addListener(new NodeMessageListener() {
+            @Override
+            public void onHeartbeat(NodeSession s, Heartbeat m) {
+                beats.add(m);
+            }
+        });
+        Client c = client("velocity-1", "tok-velocity", -1);
+        c.hello("velocity-1", NodeKind.VELOCITY);
+        assertThat(c.next().hasWelcome()).isTrue();
+        flush("velocity-1");
+        CountDownLatch release = blockLane("velocity-1");
+        c.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.getDefaultInstance()).build());
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.pending("velocity-1") == 2);
+
+        registry.shutdown(Status.UNAVAILABLE.withDescription("shutting down"));
+        release.countDown();
+        assertThat(registry.close(Duration.ofSeconds(5))).isTrue();
+        assertThat(registry.pending("velocity-1")).isZero();
+        assertThat(beats).isEmpty();
+        assertThat(gone).isEmpty();
+        assertThat(c.status()).isEqualTo(Status.Code.UNAVAILABLE);
     }
 
     @Test

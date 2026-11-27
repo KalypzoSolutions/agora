@@ -1,14 +1,20 @@
 package de.kalypzo.agora.node;
 
 import io.grpc.Status;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
@@ -20,7 +26,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>Lanes.</b> Everything that changes per-node state runs on a serial lane per node id ({@link #serialize}),
  * off the stream threads and in arrival order: the accepted {@code Hello} (listeners and Welcome), every further
- * {@code NodeMessage} of the node's sessions, and node-gone. Two sessions of the same node id therefore never run
+ * {@code NodeMessage} of the node's sessions, and node-gone. Sessions are registered on the lane too (NodeStream), so
+ * a reconnect's registration is ordered with the previous session's node-gone. During shutdown, queued tasks skip
+ * their work; {@link #close} waits for them. Two sessions of the same node id therefore never run
  * their handlers in parallel.
  *
  * <p><b>Node-gone (R2).</b> Each registered session gets an increasing {@linkplain NodeSession#generation()
@@ -36,6 +44,8 @@ public final class NodeRegistry {
     private static final Logger LOG = LoggerFactory.getLogger(NodeRegistry.class);
 
     private final Executor executor;
+    private final ExecutorService ownedExecutor; // closed by close(); null if the executor was injected
+    private final ConcurrentHashMap<String, AtomicInteger> pending = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, NodeSession> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> latestGeneration = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CompletableFuture<Void>> lanes = new ConcurrentHashMap<>();
@@ -46,11 +56,14 @@ public final class NodeRegistry {
     /** @param executor runs the lane tasks (serialized per node id by the registry) */
     public NodeRegistry(Executor executor) {
         this.executor = executor;
+        this.ownedExecutor = null;
     }
 
-    /** Lanes on virtual threads. */
+    /** Lanes on virtual threads; the executor is owned by the registry and closed by {@link #close}. */
     public NodeRegistry() {
-        this(Executors.newVirtualThreadPerTaskExecutor());
+        ExecutorService own = Executors.newVirtualThreadPerTaskExecutor();
+        this.executor = own;
+        this.ownedExecutor = own;
     }
 
     /**
@@ -110,14 +123,53 @@ public final class NodeRegistry {
     public CompletableFuture<Void> serialize(String nodeId, Runnable task) {
         @SuppressWarnings("unchecked")
         CompletableFuture<Void>[] next = new CompletableFuture[1];
+        AtomicInteger counter = pending.computeIfAbsent(nodeId, id -> new AtomicInteger());
+        counter.incrementAndGet();
         lanes.compute(nodeId, (id, prev) -> {
             CompletableFuture<Void> base = prev == null ? CompletableFuture.completedFuture(null) : prev;
-            next[0] = base.handle((v, e) -> null).thenRunAsync(() -> runSafely(nodeId, task), executor);
+            next[0] = base.handle((v, e) -> null).thenRunAsync(() -> {
+                try {
+                    runSafely(nodeId, task);
+                } finally {
+                    counter.decrementAndGet();
+                }
+            }, executor);
             return next[0];
         });
         CompletableFuture<Void> f = next[0];
         f.whenComplete((v, e) -> lanes.remove(nodeId, f));
         return f;
+    }
+
+    /** Lane tasks of {@code nodeId} that are queued or running (for tests and diagnostics). */
+    public int pending(String nodeId) {
+        AtomicInteger c = pending.get(nodeId);
+        return c == null ? 0 : c.get();
+    }
+
+    /**
+     * Ends the registry: {@link #shutdown} with {@code UNAVAILABLE} (if not done yet), then waits up to
+     * {@code timeout} for the queued lane tasks (they skip their work during shutdown), then closes the owned
+     * executor. Call before closing resources the listeners use (the DB pool). Returns {@code false} on timeout.
+     */
+    public boolean close(Duration timeout) {
+        if (!shuttingDown) shutdown(Status.UNAVAILABLE.withDescription("shutting down"));
+        boolean drained = true;
+        try {
+            CompletableFuture.allOf(lanes.values().toArray(CompletableFuture[]::new))
+                    .handle((v, e) -> null)
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            drained = false;
+            LOG.warn("Node lanes did not finish within {}", timeout);
+        } catch (InterruptedException e) {
+            drained = false;
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException e) {
+            // handle() swallows task failures
+        }
+        if (ownedExecutor != null) ownedExecutor.shutdownNow();
+        return drained;
     }
 
     /** Closes every session with {@code status} (A-14: UNAVAILABLE) without node-gone; rejects new sessions. */

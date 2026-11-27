@@ -177,6 +177,8 @@ public final class AgoraServer {
             server.shutdownNow();
             Thread.currentThread().interrupt();
         } finally {
+            // Wait (bounded) for queued lane tasks before the pool they may use is closed.
+            nodes.close(Duration.ofSeconds(5));
             scheduler.shutdownNow();
             indexes.close();
             dataSource.close();
