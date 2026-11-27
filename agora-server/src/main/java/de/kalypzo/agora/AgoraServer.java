@@ -54,6 +54,7 @@ public final class AgoraServer {
     private final NodeRegistry nodes;
     private final NodeMessageDispatcher nodeMessages;
     private final ScheduledExecutorService scheduler;
+    private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
 
     private AgoraServer(
             AgoraConfig config,
@@ -76,7 +77,11 @@ public final class AgoraServer {
         this.scheduler = scheduler;
     }
 
-    /** Starts with an already built service (cards register their handlers on it first). */
+    /**
+     * The one programmatic entry (production wiring, also for in-process use from tests): data, indexes, holders and
+     * change routing, presence, delivery, locate and the background jobs. {@code port = 0} picks a free port
+     * ({@link #port()}), {@code paperWelcomeDelay = Duration.ZERO} sends {@code Welcome} to PAPER nodes at once.
+     */
     public static AgoraServer start(AgoraConfig config) {
         return start(config, new AgoraService());
     }
@@ -255,13 +260,15 @@ public final class AgoraServer {
         return config.paperWelcomeDelay();
     }
 
+    /** Graceful shutdown (idempotent): NOT_SERVING, streams UNAVAILABLE, drain up to 10 s, close pool and jobs. */
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
         health.enterTerminalState();
         // R2: after NOT_SERVING no node-gone handling; nodes reconnect on UNAVAILABLE.
         nodes.shutdown(Status.UNAVAILABLE.withDescription("Agora is shutting down"));
         server.shutdown();
         try {
-            if (!server.awaitTermination(5, TimeUnit.SECONDS)) {
+            if (!server.awaitTermination(10, TimeUnit.SECONDS)) {
                 server.shutdownNow();
                 server.awaitTermination(5, TimeUnit.SECONDS);
             }

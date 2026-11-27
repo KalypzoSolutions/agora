@@ -47,3 +47,14 @@ publishing {
         create<MavenPublication>("maven") { from(components["java"]) }
     }
 }
+
+jib {
+    from { image = "eclipse-temurin:25-jre" }
+    to { image = "agora:0.1.0-SNAPSHOT" }
+    container {
+        mainClass = "de.kalypzo.agora.Main"
+        ports = listOf("9090")
+        creationTime = "USE_CURRENT_TIMESTAMP"
+        jvmFlags = listOf("--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=75")
+    }
+}
