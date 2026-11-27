@@ -151,6 +151,7 @@ public final class ReadService {
     /** The SQL of a STORE query (public so the index tests can EXPLAIN exactly what is executed). */
     public static SqlFragment storeQuerySql(String store, QuerySpec spec, int limit) {
         SqlFragment where = storeWhere(store, spec.getWhereList());
+        for (Sort s : spec.getSortList()) requireStoreField(store, s.getField());
         SqlFragment order = SortSql.orderBy(f -> "d", spec.getSortList(), "d.id", true);
         return SqlFragment.concat(
                 SqlFragment.of("SELECT d.id, d.data::text, d.version FROM pantheon_doc d WHERE "),
@@ -315,8 +316,21 @@ public final class ReadService {
         List<SqlFragment> parts = new ArrayList<>();
         parts.add(SqlFragment.of("d.store = " + SqlLiteral.store(store)));
         parts.add(SqlFragment.of(NOT_EXPIRED));
-        for (Condition cond : where) parts.add(PredicateSql.where("d", cond));
+        for (Condition cond : where) {
+            requireStoreField(store, cond.getField());
+            parts.add(PredicateSql.where("d", cond));
+        }
         return SqlFragment.join(" AND ", parts);
+    }
+
+    /** A store's fields belong to the store's namespace ({@code <namespace>:<store>}); others are rejected. */
+    private static void requireStoreField(String store, FieldSpec f) {
+        SqlLiteral.store(store);
+        String namespace = store.substring(0, store.indexOf(':'));
+        if (!namespace.equals(f.getNamespace())) {
+            throw new IllegalArgumentException("field " + f.getNamespace() + "." + f.getName()
+                    + " does not belong to store " + store);
+        }
     }
 
     private static UUID uuid(String s) {

@@ -120,7 +120,7 @@ class IndexServiceTest {
 
     @Test
     void storeIndexIsNamedAndScoped() throws Exception {
-        IndexDeclaration d = store("lobby:clans", field("lobby:clans", "owner", ScalarType.STRING, null), true);
+        IndexDeclaration d = store("lobby:clans", field("lobby", "owner", ScalarType.STRING, null), true);
         assertThat(name(service.declare(d))).isEqualTo("pantheon_doc_lobby_clans_owner");
         assertThat(one("SELECT indexdef FROM pg_indexes WHERE indexname = 'pantheon_doc_lobby_clans_owner'"))
                 .contains("UNIQUE").contains("store = 'lobby:clans'");
@@ -130,7 +130,7 @@ class IndexServiceTest {
     void uniqueWithDuplicatesFails() throws Exception {
         exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{\"owner\":\"x\"}'),"
                 + "('lobby:clans','b','{\"owner\":\"x\"}')");
-        IndexDeclaration d = store("lobby:clans", field("lobby:clans", "owner", ScalarType.STRING, null), true);
+        IndexDeclaration d = store("lobby:clans", field("lobby", "owner", ScalarType.STRING, null), true);
 
         assertThatThrownBy(() -> name(service.declare(d)))
                 .isInstanceOf(ExecutionException.class)
@@ -183,7 +183,7 @@ class IndexServiceTest {
     void failedIndexIsRetriedAfterFix() throws Exception {
         exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{\"owner\":\"x\"}'),"
                 + "('lobby:clans','b','{\"owner\":\"x\"}')");
-        IndexDeclaration d = store("lobby:clans", field("lobby:clans", "owner", ScalarType.STRING, null), true);
+        IndexDeclaration d = store("lobby:clans", field("lobby", "owner", ScalarType.STRING, null), true);
         assertThatThrownBy(() -> name(service.declare(d))).isInstanceOf(ExecutionException.class);
         String created = one("SELECT created_at::text FROM pantheon_index WHERE name = 'pantheon_doc_lobby_clans_owner'");
 
@@ -222,7 +222,7 @@ class IndexServiceTest {
 
     @Test
     void sortQueryUsesIndex() throws Exception {
-        FieldSpec score = field("lobby:clans", "score", ScalarType.LONG, lv(0));
+        FieldSpec score = field("lobby", "score", ScalarType.LONG, lv(0));
         exec("INSERT INTO pantheon_doc(store, id, data) SELECT 'lobby:clans', 'c' || g, "
                 + "jsonb_build_object('score', (g * 7919) % 10007) FROM generate_series(1, 10000) g");
         exec("INSERT INTO pantheon_doc(store, id, data) SELECT 'other:store', 'o' || g, '{}' "
@@ -261,7 +261,7 @@ class IndexServiceTest {
     @Test
     void changedDefinitionRebuildsReadyIndex() throws Exception {
         exec("INSERT INTO pantheon_doc(store, id, data) VALUES ('lobby:clans','a','{\"owner\":\"x\"}')");
-        FieldSpec owner = field("lobby:clans", "owner", ScalarType.STRING, null);
+        FieldSpec owner = field("lobby", "owner", ScalarType.STRING, null);
         name(service.declare(store("lobby:clans", owner, false)));
         assertThat(one("SELECT indexdef FROM pg_indexes WHERE indexname = 'pantheon_doc_lobby_clans_owner'"))
                 .doesNotContain("UNIQUE");
@@ -309,7 +309,7 @@ class IndexServiceTest {
         io.grpc.ManagedChannel ch = io.grpc.inprocess.InProcessChannelBuilder.forName(n).build();
         try {
             AgoraGrpc.AgoraBlockingStub stub = AgoraGrpc.newBlockingStub(ch).withDeadlineAfter(10, TimeUnit.SECONDS);
-            IndexDeclaration d = store("lobby:clans", field("lobby:clans", "owner", ScalarType.STRING, null), true);
+            IndexDeclaration d = store("lobby:clans", field("lobby", "owner", ScalarType.STRING, null), true);
             assertThatThrownBy(() -> stub.declareIndex(DeclareIndexRequest.newBuilder().setIndex(d).build()))
                     .isInstanceOfSatisfying(io.grpc.StatusRuntimeException.class,
                             e -> assertThat(e.getStatus().getCode()).isEqualTo(io.grpc.Status.Code.ALREADY_EXISTS));

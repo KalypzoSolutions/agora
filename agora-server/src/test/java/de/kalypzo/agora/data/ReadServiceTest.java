@@ -48,7 +48,7 @@ class ReadServiceTest {
             .setType(ScalarType.STRING).build();
     static final FieldSpec COINS = FieldSpec.newBuilder().setNamespace("economy").setName("coins")
             .setType(ScalarType.LONG).setDefaultValue(lv(0)).build();
-    static final FieldSpec SCORE = FieldSpec.newBuilder().setNamespace("lobby:clans").setName("score")
+    static final FieldSpec SCORE = FieldSpec.newBuilder().setNamespace("lobby").setName("score")
             .setType(ScalarType.LONG).setDefaultValue(lv(0)).build();
 
 
@@ -279,6 +279,23 @@ class ReadServiceTest {
         QueryResponse q = query(store("lobby:clans"), QuerySpec.newBuilder().addSort(desc(SCORE)).build());
         assertThat(q.getDocsList()).extracting(d -> d.getDoc().getStoreDoc().getId())
                 .containsExactly("A", "B", "_c", "a");
+    }
+
+    @Test
+    void storeFieldFromOtherNamespaceRejected() {
+        Condition foreign = Condition.newBuilder().setField(COINS)
+                .setPredicate(Predicate.newBuilder().setExists(true)).build();
+        List<Runnable> calls = List.of(
+                () -> query(store("lobby:clans"), QuerySpec.newBuilder().addWhere(foreign).build()),
+                () -> query(store("lobby:clans"), QuerySpec.newBuilder().addSort(desc(COINS)).build()),
+                () -> stub.count(CountRequest.newBuilder().setTarget(store("lobby:clans")).addWhere(foreign).build()));
+        for (Runnable call : calls) {
+            assertThatThrownBy(call::run).isInstanceOfSatisfying(StatusRuntimeException.class,
+                    e -> assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT));
+        }
+        // the store's own namespace is fine
+        assertThat(query(store("lobby:clans"), QuerySpec.newBuilder().addSort(desc(SCORE)).build()).getDocsCount())
+                .isZero();
     }
 
     @Test
