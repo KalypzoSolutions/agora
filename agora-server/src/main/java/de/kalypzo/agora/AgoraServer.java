@@ -96,7 +96,10 @@ public final class AgoraServer {
     /**
      * Full wiring: {@code nodes} and {@code nodeMessages} can be built by the caller first, so that components that
      * need them (A-10 holders, A-11 presence) exist before the server starts; {@code presence} provides the
-     * {@code Welcome} snapshot (A-11).
+     * {@code Welcome} snapshot (A-11). This overload does not wire the presence handlers: a caller passing a
+     * {@code PresenceService} also calls {@code presence.install(nodeMessages)} and
+     * {@code PresenceEndpoints.register(service, presence, nodes)}, otherwise ClaimPresence stays UNIMPLEMENTED (see
+     * {@link #start(AgoraConfig, AgoraService, HolderSink)}).
      */
     public static AgoraServer start(
             AgoraConfig config,

@@ -426,6 +426,83 @@ class PresenceServiceTest {
     }
 
     @Test
+    void claimerRestartDuringKickWaitIsNotAccepted() throws Exception {
+        start(Duration.ofMillis(500));
+        Client paper = connect("paper-1", "tok-paper", NodeKind.PAPER);
+        Client p1 = connect("proxy-01", "tok-p1", NodeKind.VELOCITY);
+        Client p2 = connect("proxy-02", "tok-p2", NodeKind.VELOCITY);
+        assertThat(claim("proxy-01", "tok-p1", entry(STEVE, "Steve")).getAccepted()).isTrue();
+
+        CompletableFuture<ClaimPresenceResponse> second = claimAsync("proxy-02", "tok-p2", entry(STEVE, "Steve"));
+        assertThat(p1.nextMatching(ServiceMessage::hasKickPlayer)).isNotNull(); // proxy-01 stays silent
+        // proxy-02 restarts during the wait: a new session with the same node id supersedes the claiming one.
+        Client restarted = connect("proxy-02", "tok-p2", NodeKind.VELOCITY);
+        assertThat(p2.status()).isEqualTo(Status.Code.ABORTED);
+
+        assertThat(second.get(5, TimeUnit.SECONDS).getAccepted()).isFalse();
+        assertThat(presence.snapshot()).isEmpty(); // no ghost for proxy-02, the old entry is removed anyway
+        assertThat(paper.nextMatching(m -> m.getPresenceChanged().getRemoved().equals(STEVE))).isNotNull();
+        assertThat(events).containsExactly("removed Steve proxy-01 REPLACED");
+        restarted.cancel();
+    }
+
+    @Test
+    void claimerGoneDuringKickWaitIsNotAccepted() throws Exception {
+        start(Duration.ofMillis(500));
+        Client p1 = connect("proxy-01", "tok-p1", NodeKind.VELOCITY);
+        Client p2 = connect("proxy-02", "tok-p2", NodeKind.VELOCITY);
+        assertThat(claim("proxy-01", "tok-p1", entry(STEVE, "Steve")).getAccepted()).isTrue();
+
+        CompletableFuture<ClaimPresenceResponse> second = claimAsync("proxy-02", "tok-p2", entry(STEVE, "Steve"));
+        assertThat(p1.nextMatching(ServiceMessage::hasKickPlayer)).isNotNull();
+        p2.cancel();
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.get("proxy-02").isEmpty());
+
+        assertThat(second.get(5, TimeUnit.SECONDS).getAccepted()).isFalse();
+        assertThat(presence.snapshot()).isEmpty();
+        assertThat(events).containsExactly("removed Steve proxy-01 REPLACED");
+    }
+
+    @Test
+    void heartbeatOfKickedProxyDuringWaitIsSkipped() throws Exception {
+        start();
+        Client p1 = connect("proxy-01", "tok-p1", NodeKind.VELOCITY);
+        connect("proxy-02", "tok-p2", NodeKind.VELOCITY);
+        assertThat(claim("proxy-01", "tok-p1", entry(STEVE, "Steve")).getAccepted()).isTrue();
+        clock.set(T0.plusSeconds(20)); // the entry is long past the grace
+
+        CompletableFuture<ClaimPresenceResponse> second = claimAsync("proxy-02", "tok-p2", entry(STEVE, "Steve"));
+        KickPlayer kick = p1.nextMatching(ServiceMessage::hasKickPlayer).getKickPlayer();
+        // proxy-01 already dropped Steve from its list; the claim in flight decides, not the heartbeat.
+        p1.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.getDefaultInstance()).build());
+        processed(p1);
+        assertThat(presence.snapshot()).singleElement().satisfies(e -> assertThat(e.getProxy()).isEqualTo("proxy-01"));
+
+        p1.send(NodeMessage.newBuilder()
+                .setKickResult(KickResult.newBuilder().setRequestId(kick.getRequestId()).setWasOnline(true)).build());
+        assertThat(second.get(5, TimeUnit.SECONDS).getAccepted()).isTrue();
+        assertThat(presence.snapshot()).singleElement().satisfies(e -> assertThat(e.getProxy()).isEqualTo("proxy-02"));
+        assertThat(events).containsExactly("removed Steve proxy-01 REPLACED");
+    }
+
+    @Test
+    void graceEndsAtExactlyTenSeconds() throws Exception {
+        start();
+        Client p1 = connect("proxy-01", "tok-p1", NodeKind.VELOCITY);
+        assertThat(claim("proxy-01", "tok-p1", entry(STEVE, "Steve")).getAccepted()).isTrue();
+
+        clock.set(T0.plusSeconds(10).minusMillis(1));
+        p1.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.getDefaultInstance()).build());
+        barrier(p1, STEVE);
+        assertThat(presence.snapshot()).hasSize(1);
+
+        clock.set(T0.plusSeconds(10));
+        p1.send(NodeMessage.newBuilder().setHeartbeat(Heartbeat.getDefaultInstance()).build());
+        barrier(p1, STEVE);
+        assertThat(presence.snapshot()).isEmpty();
+    }
+
+    @Test
     void paperCannotClaim() throws Exception {
         start();
         connect("paper-1", "tok-paper", NodeKind.PAPER);
@@ -465,12 +542,17 @@ class PresenceServiceTest {
      * registered after the presence service, on the same lane), then for the player's claim chain.
      */
     void barrier(Client c, String player) throws Exception {
+        processed(c);
+        presence.barrier(UUID.fromString(player)).get(5, TimeUnit.SECONDS);
+    }
+
+    /** Waits until the server has handled every message {@code c} sent so far (without the claim chain). */
+    void processed(Client c) throws Exception {
         String id = "marker-" + System.nanoTime();
         CompletableFuture<Void> seen = new CompletableFuture<>();
         markers.put(id, seen);
         c.send(NodeMessage.newBuilder().setKickResult(KickResult.newBuilder().setRequestId(id)).build());
         seen.get(5, TimeUnit.SECONDS);
-        presence.barrier(UUID.fromString(player)).get(5, TimeUnit.SECONDS);
     }
 
     Metadata headers(String node, String token) {
@@ -570,6 +652,10 @@ class PresenceServiceTest {
                 if (p.test(m)) return m;
             }
             throw new AssertionError("no matching message within 5 s");
+        }
+
+        Status.Code status() throws Exception {
+            return closed.get(5, TimeUnit.SECONDS).getCode();
         }
 
         ServiceMessage poll(Duration d) throws InterruptedException {

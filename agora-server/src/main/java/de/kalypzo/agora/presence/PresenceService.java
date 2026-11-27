@@ -110,19 +110,39 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
     // ---------- claim ----------
 
     /**
-     * Login of {@code entry.player} over {@code proxyNodeId}. {@code proxy} is set to the caller, {@code online_since}
-     * to now, {@code server} to "". Completes with {@code true} once the entry exists; with {@code false} if the
-     * claiming proxy has no open session any more after the kick wait (its login cannot complete); exceptionally
-     * with {@link IllegalStateException} if the proxy has no open session, {@link IllegalArgumentException} for an
-     * invalid UUID.
+     * Login of {@code entry.player} over {@code proxyNodeId}, by its currently registered session (see
+     * {@link #claim(NodeSession, PresenceEntry)}). Completes exceptionally with {@link IllegalStateException} if the
+     * proxy has no open session.
      */
     public CompletableFuture<Boolean> claim(String proxyNodeId, PresenceEntry entry) {
-        UUID player = UUID.fromString(entry.getPlayer());
-        return chain(player, () -> doClaim(proxyNodeId, player, entry));
+        NodeSession session = openSession(proxyNodeId).orElse(null);
+        if (session == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("node '" + proxyNodeId + "' has no open stream"));
+        }
+        return claim(session, entry);
     }
 
-    private CompletableFuture<Boolean> doClaim(String proxy, UUID player, PresenceEntry entry) {
-        if (openSession(proxy).isEmpty()) {
+    /**
+     * Login of {@code entry.player} over the proxy of {@code claimer}. {@code proxy} is set to the caller,
+     * {@code online_since} to now, {@code server} to "". Completes with {@code true} once the entry exists; with
+     * {@code false} if {@code claimer} is closed or superseded (the proxy reconnected) after the kick wait: then its
+     * login cannot complete and no entry is created (the old one is removed anyway). Completes exceptionally with
+     * {@link IllegalStateException} if {@code claimer} is not open and current when the claim starts,
+     * {@link IllegalArgumentException} for an invalid UUID.
+     */
+    public CompletableFuture<Boolean> claim(NodeSession claimer, PresenceEntry entry) {
+        UUID player = UUID.fromString(entry.getPlayer());
+        return chain(player, () -> doClaim(claimer, player, entry));
+    }
+
+    private boolean claimerValid(NodeSession claimer) {
+        return claimer.isOpen() && !registry.isSuperseded(claimer);
+    }
+
+    private CompletableFuture<Boolean> doClaim(NodeSession claimer, UUID player, PresenceEntry entry) {
+        String proxy = claimer.nodeId();
+        if (!claimerValid(claimer)) {
             return CompletableFuture.failedFuture(new IllegalStateException("node '" + proxy + "' has no open stream"));
         }
         PresenceEntry fresh = entry.toBuilder()
@@ -136,9 +156,11 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
             oldProxy = slot == null ? null : slot.entry().getProxy();
         }
         if (oldProxy == null || oldProxy.equals(proxy)) {
-            return CompletableFuture.completedFuture(put(proxy, player, fresh));
+            return CompletableFuture.completedFuture(put(claimer, player, fresh));
         }
-        return kick(oldProxy, player).thenApply(v -> put(proxy, player, fresh));
+        // Async continuation: the wait may end on the JDK-wide CompletableFuture delayer thread (timeout), which
+        // must not run the put and the PresenceEvents.
+        return kick(oldProxy, player).thenApplyAsync(v -> put(claimer, player, fresh));
     }
 
     /** Sends {@code KickPlayer} to {@code oldProxy} and completes after its answer, the timeout, or at once. */
@@ -151,6 +173,8 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
         String requestId = UUID.randomUUID().toString();
         CompletableFuture<Boolean> answer = new CompletableFuture<>();
         kicks.put(requestId, new PendingKick(oldProxy, answer));
+        // nodeGone may have completed the pending kicks before the put above: re-check after registering.
+        if (!target.get().isOpen()) answer.complete(Boolean.FALSE);
         boolean sent = target.get().send(ServiceMessage.newBuilder()
                 .setKickPlayer(KickPlayer.newBuilder().setRequestId(requestId).setPlayer(player.toString()))
                 .build());
@@ -169,18 +193,19 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
                 });
     }
 
-    /** Creates the claimed entry (replacing any other) unless the claiming proxy is gone meanwhile. */
-    private boolean put(String proxy, UUID player, PresenceEntry fresh) {
+    /** Creates the claimed entry (replacing any other) unless the claiming session is gone or superseded. */
+    private boolean put(NodeSession claimer, UUID player, PresenceEntry fresh) {
+        String proxy = claimer.nodeId();
         List<Runnable> after = new ArrayList<>(1);
         boolean accepted;
         synchronized (lock) {
             if (registry.isShuttingDown()) return false;
             Slot prev = entries.get(player);
             boolean replaces = prev != null && !prev.entry().getProxy().equals(proxy);
-            // Re-check after the (asynchronous) kick wait: if the claiming proxy has no open session now, its
-            // node-gone has run or will run without seeing this entry, so it must not be created. A reconnected
-            // proxy (the old session superseded) owns the login again and its reconciliation applies.
-            accepted = openSession(proxy).isPresent();
+            // Re-check after the (asynchronous) kick wait (cross-note A-11): if the claiming session is closed, its
+            // node-gone has run or will run without seeing this entry; if it is superseded (the proxy restarted),
+            // node-gone is skipped (R2) and the new process does not have the player. Either way: no entry.
+            accepted = claimerValid(claimer);
             if (accepted) {
                 entries.put(player, new Slot(fresh, clock.instant()));
                 broadcast(PresenceChanged.newBuilder().setUpsert(fresh).build());
@@ -190,7 +215,7 @@ public final class PresenceService implements PresenceSnapshot, HelloListener, N
             }
             if (replaces) after.add(() -> events.removed(prev.entry(), RemovalReason.REPLACED));
         }
-        if (!accepted) LOG.info("Claim of {} by '{}' dropped: the proxy's stream ended meanwhile", player, proxy);
+        if (!accepted) LOG.info("Claim of {} by '{}' dropped: the claiming session ended or was replaced meanwhile", player, proxy);
         fire(after);
         return accepted;
     }

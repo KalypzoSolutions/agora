@@ -58,7 +58,7 @@ public final class PresenceEndpoints {
                 out.onError(Status.INVALID_ARGUMENT.withDescription("entry.player is not a UUID").asRuntimeException());
                 return;
             }
-            presence.claim(caller.nodeId(), req.getEntry()).whenComplete((accepted, error) -> {
+            presence.claim(session, req.getEntry()).whenComplete((accepted, error) -> {
                 if (error == null) {
                     out.onNext(ClaimPresenceResponse.newBuilder().setAccepted(accepted).build());
                     out.onCompleted();
