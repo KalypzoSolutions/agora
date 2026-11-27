@@ -35,6 +35,8 @@ public final class TimelineService {
     static final int MAX_LIMIT = 500;
     static final Duration DEFAULT_RANGE = Duration.ofHours(24);
     static final UUID NIL = new UUID(0, 0);
+    /** Range bound not applied (only with a cursor, R48). */
+    static final long UNBOUNDED = -1;
     /** Largest instant whose millis fit into the 48 bit of a UUIDv7. */
     private static final long MAX_MILLIS = (1L << 48) - 1;
 
@@ -106,9 +108,18 @@ public final class TimelineService {
         checkMillis(req.getFromMillis(), "from_millis");
         checkMillis(req.getToMillis(), "to_millis");
 
-        // R26: 0 = unset; `to` defaults to now, `from` to `to` - 24 h
-        long to = req.getToMillis() != 0 ? req.getToMillis() : clock.millis();
-        long from = req.getFromMillis() != 0 ? req.getFromMillis() : Math.max(0, to - DEFAULT_RANGE.toMillis());
+        // R26: 0 = unset; `to` defaults to now, `from` to `to` - 24 h.
+        // R48: with a cursor, an unset bound stays open (the cursor is the upper bound, retention the lower one);
+        // otherwise a slowly paged first result would lose [now1 - 24 h, now2 - 24 h).
+        long to;
+        long from;
+        if (req.hasCursor()) {
+            to = req.getToMillis() != 0 ? req.getToMillis() : UNBOUNDED;
+            from = req.getFromMillis() != 0 ? req.getFromMillis() : UNBOUNDED;
+        } else {
+            to = req.getToMillis() != 0 ? req.getToMillis() : clock.millis();
+            from = req.getFromMillis() != 0 ? req.getFromMillis() : Math.max(0, to - DEFAULT_RANGE.toMillis());
+        }
 
         List<String> exact = new ArrayList<>();
         List<String> prefixes = new ArrayList<>();
@@ -137,13 +148,18 @@ public final class TimelineService {
 
         String sql() {
             StringBuilder sb = new StringBuilder("SELECT id, player, target, trace, server, action, world, x, y, z,"
-                    + " (SELECT array_agg(key ORDER BY key) FROM jsonb_each(with_data)) AS w_keys,"
-                    + " (SELECT array_agg(jsonb_typeof(value) ORDER BY key) FROM jsonb_each(with_data)) AS w_types,"
-                    + " (SELECT array_agg(value #>> '{}' ORDER BY key) FROM jsonb_each(with_data)) AS w_values"
-                    + " FROM pantheon_audit WHERE (player = ? OR target = ?)");
+                    + " w.w_keys, w.w_types, w.w_values FROM pantheon_audit"
+                    + " CROSS JOIN LATERAL (SELECT array_agg(key ORDER BY key) AS w_keys,"
+                    + " array_agg(jsonb_typeof(value) ORDER BY key) AS w_types,"
+                    + " array_agg(value #>> '{}' ORDER BY key) AS w_values FROM jsonb_each(with_data)) w"
+                    + " WHERE (player = ? OR target = ?)");
             // UUID.toString is [0-9a-f-] only: safe as a literal
-            sb.append(" AND id >= '").append(UuidV7.lowerBound(Instant.ofEpochMilli(fromMillis))).append("'::uuid");
-            sb.append(" AND id < '").append(UuidV7.lowerBound(Instant.ofEpochMilli(toMillis))).append("'::uuid");
+            if (fromMillis != UNBOUNDED) {
+                sb.append(" AND id >= '").append(UuidV7.lowerBound(Instant.ofEpochMilli(fromMillis))).append("'::uuid");
+            }
+            if (toMillis != UNBOUNDED) {
+                sb.append(" AND id < '").append(UuidV7.lowerBound(Instant.ofEpochMilli(toMillis))).append("'::uuid");
+            }
             if (!exact.isEmpty() && !prefixes.isEmpty()) sb.append(" AND (action = ANY(?) OR action LIKE ANY(?))");
             else if (!exact.isEmpty()) sb.append(" AND action = ANY(?)");
             else if (!prefixes.isEmpty()) sb.append(" AND action LIKE ANY(?)");

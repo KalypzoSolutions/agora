@@ -545,4 +545,79 @@ class TimelineServiceTest {
         assertThat(partitionsInPlan(svc.query(request(PLAYER).build(), null)))
                 .containsExactlyInAnyOrder("20261126", "20261127");
     }
+
+    /** A clock the test moves forward between pages. */
+    static final class MovingClock extends Clock {
+        final java.util.concurrent.atomic.AtomicReference<Instant> now;
+
+        MovingClock(Instant start) {
+            now = new java.util.concurrent.atomic.AtomicReference<>(start);
+        }
+
+        @Override public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+        @Override public Instant instant() { return now.get(); }
+    }
+
+    @Test
+    void pagingWithAdvancingClockHasNoGap() throws Exception {
+        // R48: the first page is the last 24 h; later pages without explicit range have no 24 h lower bound
+        MovingClock clock = new MovingClock(NOW);
+        serve(new TimelineService(new AuditStore(ds), ds, clock));
+        AuditEntry.Builder older = entry(NOW.minus(Duration.ofHours(25)), PLAYER, "shop:buy");
+        List<AuditEntry.Builder> inRange = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            inRange.add(entry(NOW.minus(Duration.ofHours(24)).plusSeconds(i), PLAYER, "shop:buy"));
+        }
+        insert(older);
+        insert(inRange.toArray(AuditEntry.Builder[]::new));
+
+        TimelineResponse first = stub.timeline(request(PLAYER).setLimit(2).build());
+        assertThat(ids(first)).containsExactly(uuid(inRange.get(5).getId()), uuid(inRange.get(4).getId()));
+        List<UUID> seen = new ArrayList<>(ids(first));
+        TimelineResponse page = first;
+        while (page.hasCursor()) {
+            clock.now.set(clock.instant().plus(Duration.ofHours(1))); // staff pages slowly
+            page = stub.timeline(request(PLAYER).setLimit(2).setCursor(page.getCursor()).build());
+            seen.addAll(ids(page));
+        }
+
+        List<UUID> expected = new ArrayList<>();
+        for (int i = 5; i >= 0; i--) expected.add(uuid(inRange.get(i).getId()));
+        expected.add(uuid(older.getId())); // older entries may follow (R48)
+        assertThat(seen).isEqualTo(expected);
+        assertThat(auditViews()).hasSize(1);
+    }
+
+    @Test
+    void explicitRangeStillAppliesWithCursor() throws Exception {
+        AuditEntry.Builder a = entry(NOW.minusSeconds(30), PLAYER, "shop:buy");
+        AuditEntry.Builder b = entry(NOW.minusSeconds(20), PLAYER, "shop:buy");
+        AuditEntry.Builder c = entry(NOW.minusSeconds(10), PLAYER, "shop:buy");
+        insert(a, b, c);
+        long from = millis(NOW.minusSeconds(25));
+        TimelineResponse r = stub.timeline(request(PLAYER).setFromMillis(from).setCursor(c.getId()).build());
+        assertThat(ids(r)).containsExactly(uuid(b.getId()));
+        TimelineResponse to = stub.timeline(request(PLAYER).setToMillis(millis(NOW.minusSeconds(25)))
+                .setCursor(c.getId()).build());
+        assertThat(ids(to)).containsExactly(uuid(a.getId()));
+    }
+
+    @Test
+    void doubleValuesRoundTrip() throws Exception {
+        double[] values = {1.0E7, 1.0E-7, 1.0E300, Double.MIN_VALUE, Double.MAX_VALUE, -2.5, 0.0, 123456789.125};
+        AuditEntry.Builder e = entry(NOW.minusSeconds(5), PLAYER, "shop:buy");
+        for (int i = 0; i < values.length; i++) e.putWith("d" + i, AuditValue.newBuilder().setD(values[i]).build());
+        e.putWith("l", AuditValue.newBuilder().setL(Long.MIN_VALUE).build());
+        e.putWith("neg_zero", AuditValue.newBuilder().setD(-0.0).build());
+        insert(e);
+
+        AuditEntry read = stub.timeline(request(PLAYER).build()).getEntries(0).getEntry();
+        for (int i = 0; i < values.length; i++) {
+            assertThat(read.getWithMap().get("d" + i).getValueCase()).as("d" + i).isEqualTo(AuditValue.ValueCase.D);
+            assertThat(read.getWithMap().get("d" + i).getD()).as("d" + i).isEqualTo(values[i]);
+        }
+        assertThat(read.getWithMap().get("l").getL()).isEqualTo(Long.MIN_VALUE);
+        assertThat(read.getWithMap().get("neg_zero").getD()).isEqualTo(0.0); // documented: -0.0 becomes 0.0
+    }
 }
