@@ -26,6 +26,7 @@ import de.kalypzo.agora.sql.PredicateSql;
 import de.kalypzo.agora.sql.SqlFragment;
 import de.kalypzo.agora.sql.SqlLiteral;
 import de.kalypzo.agora.sql.UpdateBuilder;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -35,6 +36,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -53,7 +55,8 @@ import org.slf4j.LoggerFactory;
  * store the result, commit, and only then hand every changed row to the {@link ChangePublisher} with the request's key
  * (E4). A failed condition rolls back and is <b>not</b> stored (Apply, Transfer); every other outcome is.
  *
- * <p>Rows are written in a fixed order (Apply: namespace ascending; Transfer: {@link RowRef} as string), so writes
+ * <p>Rows are written in a fixed order (Apply: namespace ascending; Transfer: {@link RowRef} as string in UTF-8 byte
+ * order, like {@code COLLATE "C"}), so writes
  * never deadlock. Expired store documents (not yet removed by the cleanup job) count as absent (R41): before any write
  * to a store its expired documents are deleted in the same transaction, published as {@code deleted} after the commit
  * (without a key, they are not the request's own change).
@@ -67,6 +70,9 @@ public final class WriteService {
 
     private static final Logger LOG = LoggerFactory.getLogger(WriteService.class);
     private static final int QUERY_TIMEOUT_SECONDS = 5;
+    /** UTF-8 byte order, the same as Postgres {@code COLLATE "C"}: one lock order for Transfer and the purge (m-1). */
+    private static final Comparator<String> BINARY = (x, y) -> Arrays.compareUnsigned(
+            x.getBytes(StandardCharsets.UTF_8), y.getBytes(StandardCharsets.UTF_8));
 
     private final DataSource ds;
     private final ChangePublisher publisher;
@@ -136,8 +142,8 @@ public final class WriteService {
         RowWrite fromWrite = RowWrite.of(from, List.of(withdraw), UpdateBuilder.implicitConditions(List.of(withdraw)));
         RowWrite toWrite = RowWrite.of(to, List.of(inc), List.of());
         List<RowWrite> ordered = new ArrayList<>(List.of(fromWrite, toWrite));
-        ordered.sort(Comparator.comparing(w -> sortKey(w.ref())));
-        TreeSet<String> stores = new TreeSet<>();
+        ordered.sort(Comparator.comparing(w -> sortKey(w.ref()), BINARY));
+        TreeSet<String> stores = new TreeSet<>(BINARY);
         for (RowRef r : List.of(from, to)) if (r.hasStoreDoc()) stores.add(r.getStoreDoc().getStore());
 
         return run("transfer", key, TransferResponse.newBuilder(), tx -> {
@@ -272,7 +278,12 @@ public final class WriteService {
                 rollbackQuietly(c);
                 throw e;
             } finally {
-                c.setAutoCommit(true);
+                try {
+                    c.setAutoCommit(true);
+                } catch (SQLException e) {
+                    // after a commit the result stands; the pool discards the broken connection
+                    LOG.warn("Resetting autocommit failed", e);
+                }
             }
         }
         for (DocChanged change : changes) {
@@ -342,7 +353,7 @@ public final class WriteService {
             for (String store : stores) {
                 try (PreparedStatement ps = prepare(SqlFragment.of(
                                 "DELETE FROM pantheon_doc d USING (SELECT store, id FROM pantheon_doc WHERE store = ?"
-                                        + " AND expires_at <= now() ORDER BY id FOR UPDATE) e"
+                                        + " AND expires_at <= now() ORDER BY id COLLATE \"C\" FOR UPDATE) e"
                                         + " WHERE d.store = e.store AND d.id = e.id"
                                         + " RETURNING d.id, nextval('pantheon_version')",
                                 store));
@@ -356,7 +367,8 @@ public final class WriteService {
         }
 
         /**
-         * Writes one row: creates it if missing, then updates it under its conditions. A row with conditions only is
+         * Writes one row: inserts it with its computed data if missing (and its conditions hold for an empty row),
+         * otherwise updates it under its conditions. A row with conditions only is
          * checked under a row lock (a missing row counts as empty, its defaults apply) and not created. Returns the
          * new row, {@code null} for a checked row, or {@link RowWrite#UNMET} if a condition failed.
          */
@@ -372,8 +384,14 @@ public final class WriteService {
                     return rs.next() ? null : RowWrite.UNMET;
                 }
             }
-            try (PreparedStatement ps = prepare(w.insert())) {
-                ps.executeUpdate();
+            // A missing row is inserted with its computed data in one statement (R43). The conflict target is the
+            // primary key only, so a violated unique index raises 23505 (ALREADY_EXISTS) instead of being swallowed.
+            // If the conditions do not hold for an empty row, a missing row is never created (the UPDATE below then
+            // finds no row: UNMET).
+            if (w.conditions().isEmpty() || holdsOnEmptyRow(w)) {
+                try (PreparedStatement ps = prepare(w.insert()); ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return changed(w.ref(), rs.getString(1), rs.getLong(2));
+                }
             }
             SqlFragment update = SqlFragment.concat(
                     SqlFragment.of("UPDATE " + w.table() + " AS t SET data = "),
@@ -385,6 +403,15 @@ public final class WriteService {
             try (PreparedStatement ps = prepare(update); ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return RowWrite.UNMET;
                 return changed(w.ref(), rs.getString(1), rs.getLong(2));
+            }
+        }
+
+        /** Whether the row's conditions hold for a row that does not exist yet (empty data, defaults apply). */
+        private boolean holdsOnEmptyRow(RowWrite w) throws SQLException {
+            SqlFragment check = SqlFragment.concat(
+                    SqlFragment.of("SELECT 1 FROM (SELECT '{}'::jsonb AS data) AS t WHERE "), w.where());
+            try (PreparedStatement ps = prepare(check); ResultSet rs = ps.executeQuery()) {
+                return rs.next();
             }
         }
 
@@ -430,16 +457,30 @@ public final class WriteService {
                     SqlFragment.of("AND " + alias + ".id = ?", ref.getStoreDoc().getId()));
         }
 
+        /**
+         * {@code INSERT … SELECT <key>, <data computed over '{}'> … ON CONFLICT (<primary key>) DO NOTHING
+         * RETURNING data::text, version}: no row back means the row already exists.
+         */
         SqlFragment insert() {
+            SqlFragment head;
+            String target;
             if (ref.hasPlayerRow()) {
-                return SqlFragment.concat(
-                        SqlFragment.of("INSERT INTO pantheon_player (player, namespace) VALUES (?, ",
+                head = SqlFragment.concat(
+                        SqlFragment.of("INSERT INTO pantheon_player (player, namespace, data) SELECT ?, ",
                                 UUID.fromString(ref.getPlayerRow().getPlayer())),
-                        SqlFragment.of("?) ON CONFLICT DO NOTHING", ref.getPlayerRow().getNamespace()));
+                        SqlFragment.of("?, ", ref.getPlayerRow().getNamespace()));
+                target = "(player, namespace)";
+            } else {
+                head = SqlFragment.concat(
+                        SqlFragment.of("INSERT INTO pantheon_doc (store, id, data) SELECT ?, ", ref.getStoreDoc().getStore()),
+                        SqlFragment.of("?, ", ref.getStoreDoc().getId()));
+                target = "(store, id)";
             }
             return SqlFragment.concat(
-                    SqlFragment.of("INSERT INTO pantheon_doc (store, id) VALUES (?, ", ref.getStoreDoc().getStore()),
-                    SqlFragment.of("?) ON CONFLICT DO NOTHING", ref.getStoreDoc().getId()));
+                    head,
+                    data,
+                    SqlFragment.of(" FROM (SELECT '{}'::jsonb AS data) AS s ON CONFLICT " + target
+                            + " DO NOTHING RETURNING data::text, version"));
         }
     }
 

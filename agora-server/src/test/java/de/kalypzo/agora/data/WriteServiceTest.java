@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import de.kalypzo.agora.db.Migrations;
 import de.kalypzo.agora.grpc.DataEndpoints;
+import de.kalypzo.agora.index.IndexService;
 import de.kalypzo.agora.proto.v1.*;
 import de.kalypzo.agora.service.AgoraService;
 import io.grpc.ManagedChannel;
@@ -497,7 +498,35 @@ class WriteServiceTest {
         assertThat(coins(b)).isEqualTo(1_000);
     }
 
-    // ---------- further behaviour (cross-notes, R22, R41) ----------
+    // ---------- further behaviour (cross-notes, R22, R41, R43) ----------
+
+    @Test
+    void uniqueFieldWithDefaultOnNewRowIsApplied() throws Exception {
+        FieldSpec tag = FieldSpec.newBuilder().setNamespace("lobby").setName("tag").setType(ScalarType.STRING)
+                .setDefaultValue(sv("")).build();
+        IndexService indexes = new IndexService(ds);
+        try {
+            indexes.declare(IndexDeclaration.newBuilder().setTarget(QueryTarget.newBuilder().setStore(CLANS))
+                    .setField(tag).setUnique(true).build()).get(10, TimeUnit.SECONDS);
+        } finally {
+            indexes.close();
+        }
+        try {
+        assertThat(applyNow(doc("t1"), inc(SCORE, 1)).getApplied()).isTrue(); // t1 without the field
+
+        ApplyResponse r = applyNow(doc("t2"), set(tag, sv("abc"))); // t2 does not exist yet
+        assertThat(r.getApplied()).isTrue();
+        assertThat(r.getRows(0).getDataOrThrow("tag").getStringValue()).isEqualTo("abc");
+
+        StatusRuntimeException dup = (StatusRuntimeException) catchStatus(() -> applyNow(doc("t3"), set(tag, sv("abc"))));
+        assertThat(dup.getStatus().getCode()).isEqualTo(Status.Code.ALREADY_EXISTS);
+        assertThat(dup.getStatus().getDescription()).isEqualTo("pantheon_doc_lobby_clans_tag");
+        assertThat(count("SELECT count(*) FROM pantheon_doc WHERE id = 't3'")).isZero();
+        } finally {
+            exec("DROP INDEX IF EXISTS pantheon_doc_lobby_clans_tag");
+            exec("DELETE FROM pantheon_index WHERE name = 'pantheon_doc_lobby_clans_tag'");
+        }
+    }
 
     @Test
     void requestRejectionsAreInvalidArgument() {
