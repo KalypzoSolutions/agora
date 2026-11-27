@@ -72,8 +72,13 @@ public final class UpdateBuilder {
                     }
                     long before = delta.getOrDefault(name, 0L);
                     long required = Math.subtractExact(amount, before);
+                    FieldSpec f = op.getField();
+                    // R38: a missing field without default counts as 0
+                    if (!f.hasDefaultValue() || Values.isNull(f.getDefaultValue())) {
+                        f = f.toBuilder().setDefaultValue(Value.newBuilder().setLongValue(0)).build();
+                    }
                     out.add(Condition.newBuilder()
-                            .setField(op.getField())
+                            .setField(f)
                             .setPredicate(Predicate.newBuilder()
                                     .setGte(Value.newBuilder().setLongValue(required)))
                             .build());

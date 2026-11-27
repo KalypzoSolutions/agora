@@ -317,6 +317,35 @@ class SqlSemanticsTest {
         assertThat(apply("{}", inc(d, -3))).isEqualTo("{\"d\": -3}");
     }
 
+    /** R38: a missing field without default counts as 0 for the implicit withdraw condition. */
+    @Test
+    void withdrawAfterIncOnMissingFieldWithoutDefault() throws SQLException {
+        FieldSpec l = field("l", ScalarType.LONG);
+        assertThat(apply("{}", inc(l, 5), withdraw(l, 3))).isEqualTo("{\"l\": 2}");
+        assertThat(apply("{}", inc(l, 5), withdraw(l, 6))).isNull();
+        assertThat(apply("{}", withdraw(l, 1))).isNull();
+    }
+
+    /** R37: in() on SET is order-independent set equality; LIST and OBJECT stay deep, order-dependent. */
+    @Test
+    void inOnSetIsSetEquality() throws SQLException {
+        Predicate in = Predicate.newBuilder().setInValues(ValueList.newBuilder()
+                .addValues(list(lv(1), lv(2))).addValues(list(lv(9)))).build();
+        FieldSpec set = field("s", ScalarType.SET);
+        assertThat(test("{\"s\": [2, 1]}", cond(set, in))).isTrue();
+        assertThat(test("{\"s\": [9]}", cond(set, in))).isTrue();
+        assertThat(test("{\"s\": [1]}", cond(set, in))).isFalse();
+        assertThat(test("{}", cond(set, in))).isFalse();
+        FieldSpec lst = field("l", ScalarType.LIST);
+        assertThat(test("{\"l\": [1, 2]}", cond(lst, in))).isTrue();
+        assertThat(test("{\"l\": [2, 1]}", cond(lst, in))).isFalse();
+        Predicate inObj = Predicate.newBuilder().setInValues(ValueList.newBuilder()
+                .addValues(map("a", map("b", lv(1))))).build();
+        FieldSpec obj = field("o", ScalarType.OBJECT);
+        assertThat(test("{\"o\": {\"a\": {\"b\": 1}}}", cond(obj, inObj))).isTrue();
+        assertThat(test("{\"o\": {\"a\": {\"b\": 2}}}", cond(obj, inObj))).isFalse();
+    }
+
     /** R35: where() is always true or false, never SQL NULL. */
     @Test
     void whereNeverYieldsNull() throws SQLException {

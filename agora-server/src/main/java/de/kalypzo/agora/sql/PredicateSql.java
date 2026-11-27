@@ -103,6 +103,11 @@ public final class PredicateSql {
             if (!Values.isNull(v)) items.add(param(f.getType(), v)); // NULL never matches (E14)
         }
         if (items.isEmpty()) return SqlFragment.of("(false)");
+        if (f.getType() == ScalarType.SET) { // R37: OR of order-independent set equalities
+            List<SqlFragment> eqs = new ArrayList<>();
+            for (Value v : values) if (!Values.isNull(v)) eqs.add(setEquals(read, v, true));
+            return SqlFragment.concat(SqlFragment.of("("), SqlFragment.join(" OR ", eqs), SqlFragment.of(")"));
+        }
         return notNullAnd(read, f, SqlFragment.concat(
                 SqlFragment.of("("), read, SqlFragment.of(") IN ("), SqlFragment.join(", ", items), SqlFragment.of(")")));
     }
