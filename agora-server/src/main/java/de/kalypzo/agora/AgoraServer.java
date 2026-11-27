@@ -12,6 +12,7 @@ import de.kalypzo.agora.db.Database;
 import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
 import de.kalypzo.agora.grpc.PresenceEndpoints;
+import de.kalypzo.agora.holder.HolderRegistry;
 import de.kalypzo.agora.node.NodeMessageDispatcher;
 import de.kalypzo.agora.node.NodeRegistry;
 import de.kalypzo.agora.node.NodeSession;
@@ -76,13 +77,25 @@ public final class AgoraServer {
         return start(config, new AgoraService());
     }
 
+    /**
+     * Default wiring: presence (A-11) and the holder registry (A-10), which receives the LoadPlayer claims, the stream
+     * messages and node-gone, and routes every committed change as {@code DocChanged} to the holders and watchers.
+     */
     public static AgoraServer start(AgoraConfig config, AgoraService service) {
-        return start(config, service, HolderSink.NOOP);
+        NodeRegistry nodes = new NodeRegistry();
+        NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
+        PresenceService presence = new PresenceService(nodes);
+        presence.install(nodeMessages);
+        PresenceEndpoints.register(service, presence, nodes);
+        HolderRegistry holders = new HolderRegistry(nodes);
+        holders.install(nodeMessages);
+        return start(config, service, holders, nodes, nodeMessages, presence, holders);
     }
 
     /**
-     * {@code holders} receives the LoadPlayer claims (A-10 passes the holder registry; until then a no-op). Wires the
-     * presence (A-11): {@code ClaimPresence}, the stream handlers and the {@code Welcome} snapshot.
+     * {@code holders} receives the LoadPlayer claims; no changes are published (use the default
+     * {@link #start(AgoraConfig, AgoraService)} for the holder routing of A-10). Wires the presence (A-11):
+     * {@code ClaimPresence}, the stream handlers and the {@code Welcome} snapshot.
      */
     public static AgoraServer start(AgoraConfig config, AgoraService service, HolderSink holders) {
         NodeRegistry nodes = new NodeRegistry();
