@@ -11,9 +11,11 @@ import de.kalypzo.agora.data.WriteService;
 import de.kalypzo.agora.db.Database;
 import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
+import de.kalypzo.agora.grpc.PresenceEndpoints;
 import de.kalypzo.agora.node.NodeMessageDispatcher;
 import de.kalypzo.agora.node.NodeRegistry;
 import de.kalypzo.agora.node.NodeSession;
+import de.kalypzo.agora.presence.PresenceService;
 import de.kalypzo.agora.presence.PresenceSnapshot;
 import de.kalypzo.agora.index.IndexService;
 import de.kalypzo.agora.db.Migrations;
@@ -78,9 +80,17 @@ public final class AgoraServer {
         return start(config, service, HolderSink.NOOP);
     }
 
-    /** {@code holders} receives the LoadPlayer claims (A-10 passes the holder registry; until then a no-op). */
+    /**
+     * {@code holders} receives the LoadPlayer claims (A-10 passes the holder registry; until then a no-op). Wires the
+     * presence (A-11): {@code ClaimPresence}, the stream handlers and the {@code Welcome} snapshot.
+     */
     public static AgoraServer start(AgoraConfig config, AgoraService service, HolderSink holders) {
-        return start(config, service, holders, new NodeRegistry(), new NodeMessageDispatcher(), PresenceSnapshot.EMPTY);
+        NodeRegistry nodes = new NodeRegistry();
+        NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
+        PresenceService presence = new PresenceService(nodes);
+        presence.install(nodeMessages);
+        PresenceEndpoints.register(service, presence, nodes);
+        return start(config, service, holders, nodes, nodeMessages, presence);
     }
 
     /**
