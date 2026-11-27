@@ -1,0 +1,175 @@
+syntax = "proto3";
+package agora.v1;
+option java_package = "de.kalypzo.agora.proto.v1";
+option java_multiple_files = true;
+
+service Agora {
+  rpc Connect       (stream NodeMessage)   returns (stream ServiceMessage);
+  rpc ClaimPresence (ClaimPresenceRequest) returns (ClaimPresenceResponse);   // nur VELOCITY
+  rpc Locate        (LocateRequest)        returns (LocateResponse);          // E1
+  rpc LoadPlayer    (LoadPlayerRequest)    returns (LoadPlayerResponse);
+  rpc Load          (LoadRequest)          returns (LoadResponse);
+  rpc Query         (QueryRequest)         returns (QueryResponse);
+  rpc Count         (CountRequest)         returns (CountResponse);
+  rpc Versions      (VersionsRequest)      returns (VersionsResponse);
+  rpc Apply         (ApplyRequest)         returns (ApplyResponse);
+  rpc Create        (CreateRequest)        returns (CreateResponse);
+  rpc Delete        (DeleteRequest)        returns (DeleteResponse);
+  rpc Expire        (ExpireRequest)        returns (ExpireResponse);
+  rpc Transfer      (TransferRequest)      returns (TransferResponse);
+  rpc DeclareIndex  (DeclareIndexRequest)  returns (DeclareIndexResponse);
+}
+
+// ---------- Werte ----------
+message Value {
+  oneof kind {
+    bool null_value = 1;
+    bool bool_value = 2;
+    sint64 long_value = 3;
+    double double_value = 4;
+    string string_value = 5;
+    ValueList list_value = 6;
+    ValueMap map_value = 7;
+  }
+}
+message ValueList { repeated Value values = 1; }
+message ValueMap  { map<string, Value> fields = 1; }
+
+enum ScalarType {
+  SCALAR_TYPE_UNSPECIFIED = 0;
+  LONG = 1;
+  DOUBLE = 2;
+  BOOLEAN = 3;
+  STRING = 4;
+  LIST = 5;
+  SET = 6;
+  OBJECT = 7;
+}
+message FieldSpec { string namespace = 1; string name = 2; ScalarType type = 3; Value default_value = 4; } // fehlt = kein Default
+
+// ---------- Referenzen ----------
+message StoreDoc  { string store = 1; string id = 2; }            // store = '<namespace>:<store>'
+message PlayerRow { string player = 1; string namespace = 2; }
+message DocRef { oneof target { string player = 1; StoreDoc store_doc = 2; } }    // player = alle Namespaces
+message RowRef { oneof target { PlayerRow player_row = 1; StoreDoc store_doc = 2; } }
+message Row    { RowRef ref = 1; int64 version = 2; map<string, Value> data = 3; }
+message DocSnapshot { DocRef doc = 1; repeated Row rows = 2; }
+
+// ---------- Operationen, Bedingungen, Abfragen ----------
+message FieldOp {
+  FieldSpec field = 1;
+  oneof op {
+    Value set = 2;
+    bool unset = 3;
+    sint64 inc = 4;
+    Value max = 5;
+    Value min = 6;
+    Value add = 7;
+    Value remove = 8;
+    sint64 withdraw = 9;
+  }
+}
+message Predicate {
+  oneof kind {
+    Value eq = 1;
+    Value ne = 2;
+    Value gt = 3;
+    Value gte = 4;
+    Value lt = 5;
+    Value lte = 6;
+    Value contains = 7;
+    ValueList in_values = 8;
+    bool exists = 9;
+    Predicate negate = 10;
+  }
+}
+message Condition   { FieldSpec field = 1; Predicate predicate = 2; }
+message Sort        { FieldSpec field = 1; bool descending = 2; }
+message QueryTarget { oneof target { bool players = 1; string store = 2; } }
+message QuerySpec   { repeated Condition where = 1; repeated Sort sort = 2; int32 limit = 3; int32 offset = 4; } // E6
+
+// ---------- Daten-Aufrufe ----------
+message LoadPlayerRequest  { string player = 1; }
+message LoadPlayerResponse { repeated Row rows = 1; }
+message LoadRequest        { DocRef doc = 1; }
+message LoadResponse       { repeated Row rows = 1; }                 // leer = nicht vorhanden
+message QueryRequest       { QueryTarget target = 1; QuerySpec spec = 2; }
+message QueryResponse      { repeated DocSnapshot docs = 1; }
+message CountRequest       { QueryTarget target = 1; repeated Condition where = 2; }
+message CountResponse      { int64 count = 1; }
+message VersionsRequest    { repeated RowRef rows = 1; repeated string players = 2; }   // E7
+message RowVersion         { RowRef ref = 1; int64 version = 2; }                     // fehlende Zeile: 0
+message VersionsResponse   { repeated RowVersion versions = 1; }
+message ApplyRequest  { string idempotency_key = 1; DocRef doc = 2; repeated FieldOp ops = 3;
+                        repeated Condition conditions = 4; int64 created_at_millis = 5; }
+message ApplyResponse { bool applied = 1; repeated Row rows = 2; }    // neuer Stand der betroffenen Zeilen
+message CreateRequest  { string idempotency_key = 1; StoreDoc doc = 2; map<string, Value> data = 3; }
+message CreateResponse { bool created = 1; Row row = 2; }
+message DeleteRequest  { string idempotency_key = 1; StoreDoc doc = 2; }
+message DeleteResponse { bool deleted = 1; }
+message ExpireRequest  { string idempotency_key = 1; StoreDoc doc = 2; int64 at_millis = 3; }
+message ExpireResponse {}
+message TransferRequest  { string idempotency_key = 1; DocRef from = 2; DocRef to = 3; FieldSpec field = 4; sint64 amount = 5; }
+message TransferResponse { bool transferred = 1; repeated Row rows = 2; }
+message IndexDeclaration     { QueryTarget target = 1; FieldSpec field = 2; bool unique = 3; }
+message DeclareIndexRequest  { IndexDeclaration index = 1; }
+message DeclareIndexResponse { string name = 1; }
+
+// ---------- Presence, Zustellung, Ort ----------
+enum NodeKind { NODE_KIND_UNSPECIFIED = 0; PAPER = 1; VELOCITY = 2; }
+message PresenceEntry { string player = 1; string name = 2; string server = 3; string proxy = 4;
+                        string locale = 5; int64 online_since_millis = 6; }   // server "" bis zum ersten Switch
+message ClaimPresenceRequest  { PresenceEntry entry = 1; }
+message ClaimPresenceResponse { bool accepted = 1; }
+message NetworkLocation { string server = 1; string world = 2; double x = 3; double y = 4; double z = 5; float yaw = 6; float pitch = 7; }
+message LocateRequest  { string player = 1; }
+message LocateResponse { bool found = 1; NetworkLocation location = 2; }
+enum DeliveryKind { DELIVERY_KIND_UNSPECIFIED = 0; CHAT = 1; ACTION_BAR = 2; TITLE = 3; SOUND = 4; }
+message SoundSpec  { string key = 1; string source = 2; float volume = 3; float pitch = 4; }
+message TitleTimes { int64 fade_in_millis = 1; int64 stay_millis = 2; int64 fade_out_millis = 3; }
+message Delivery   { DeliveryKind kind = 1; string component_json = 2; string subtitle_json = 3;
+                     TitleTimes times = 4; SoundSpec sound = 5; }      // Components als Adventure-Gson-JSON
+
+// ---------- Stream ----------
+message NodeMessage {
+  oneof payload {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    WatchStore watch_store = 3;
+    UnwatchStore unwatch_store = 4;
+    KickResult kick_result = 5;
+    PlayerSwitched player_switched = 6;
+    PlayerLeft player_left = 7;
+    LocationReply location_reply = 8;
+    SendDelivery send_delivery = 9;
+    ReleasePlayer release_player = 10;
+  }
+}
+message ServiceMessage {
+  oneof payload {
+    Welcome welcome = 1;
+    PresenceChanged presence_changed = 2;
+    DocChanged doc_changed = 3;
+    Deliver deliver = 4;
+    LocationRequest location_request = 5;
+    KickPlayer kick_player = 6;
+  }
+}
+message Hello { string node_id = 1; NodeKind kind = 2; repeated string held_players = 3;
+                repeated string watched_stores = 4; repeated PresenceEntry players = 5; }
+message Heartbeat { repeated string held_players = 1; repeated PresenceEntry players = 2; repeated string watched_stores = 3; } // E8
+message WatchStore     { string store = 1; }
+message UnwatchStore   { string store = 1; }
+message ReleasePlayer  { string player = 1; }                                       // E3
+message PlayerSwitched { string player = 1; string server = 2; }
+message PlayerLeft     { string player = 1; }
+message KickPlayer     { string request_id = 1; string player = 2; }
+message KickResult     { string request_id = 1; bool was_online = 2; }
+message LocationRequest { string request_id = 1; string player = 2; }
+message LocationReply   { string request_id = 1; bool found = 2; NetworkLocation location = 3; }
+message SendDelivery { string player = 1; Delivery delivery = 2; }                   // E2
+message Deliver      { string player = 1; Delivery delivery = 2; }
+message Welcome      { repeated PresenceEntry presence = 1; }
+message PresenceChanged { oneof change { PresenceEntry upsert = 1; string removed = 2; } }
+message DocChanged { RowRef ref = 1; int64 version = 2; bool deleted = 3;
+                     map<string, Value> data = 4; string idempotency_key = 5; }       // E4
