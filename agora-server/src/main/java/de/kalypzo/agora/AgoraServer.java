@@ -1,0 +1,114 @@
+package de.kalypzo.agora;
+
+import com.zaxxer.hikari.HikariDataSource;
+import de.kalypzo.agora.auth.AuthInterceptor;
+import de.kalypzo.agora.auth.NodeTokens;
+import de.kalypzo.agora.config.AgoraConfig;
+import de.kalypzo.agora.db.Database;
+import de.kalypzo.agora.db.Migrations;
+import de.kalypzo.agora.service.AgoraService;
+import io.grpc.Server;
+import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import io.grpc.protobuf.services.HealthStatusManager;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/** Agora server: Postgres pool, migration, gRPC server with auth and health. */
+public final class AgoraServer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AgoraServer.class);
+
+    private final AgoraConfig config;
+    private final HikariDataSource dataSource;
+    private final AgoraService service;
+    private final HealthStatusManager health;
+    private final Server server;
+
+    private AgoraServer(
+            AgoraConfig config,
+            HikariDataSource dataSource,
+            AgoraService service,
+            HealthStatusManager health,
+            Server server) {
+        this.config = config;
+        this.dataSource = dataSource;
+        this.service = service;
+        this.health = health;
+        this.server = server;
+    }
+
+    /** Starts with an already built service (cards register their handlers on it first). */
+    public static AgoraServer start(AgoraConfig config) {
+        return start(config, new AgoraService());
+    }
+
+    public static AgoraServer start(AgoraConfig config, AgoraService service) {
+        NodeTokens tokens = NodeTokens.load(config.tokensFile());
+        HealthStatusManager health = new HealthStatusManager();
+        health.setStatus("", ServingStatus.NOT_SERVING);
+        HikariDataSource ds = Database.open(config);
+        try {
+            Migrations.migrate(ds);
+            Server server = NettyServerBuilder.forPort(config.port())
+                    .keepAliveTime(10, TimeUnit.SECONDS)
+                    .permitKeepAliveTime(5, TimeUnit.SECONDS)
+                    .permitKeepAliveWithoutCalls(true)
+                    .intercept(new AuthInterceptor(tokens))
+                    .addService(service)
+                    .addService(health.getHealthService())
+                    .build()
+                    .start();
+            health.setStatus("", ServingStatus.SERVING);
+            health.setStatus("agora.v1.Agora", ServingStatus.SERVING);
+            LOG.info("Agora listening on port {}", server.getPort());
+            return new AgoraServer(config, ds, service, health, server);
+        } catch (IOException e) {
+            ds.close();
+            throw new UncheckedIOException(e);
+        } catch (RuntimeException e) {
+            ds.close();
+            throw e;
+        }
+    }
+
+    public int port() {
+        return server.getPort();
+    }
+
+    public AgoraConfig config() {
+        return config;
+    }
+
+    public AgoraService service() {
+        return service;
+    }
+
+    public HikariDataSource dataSource() {
+        return dataSource;
+    }
+
+    public Duration paperWelcomeDelay() {
+        return config.paperWelcomeDelay();
+    }
+
+    public void close() {
+        health.enterTerminalState();
+        server.shutdown();
+        try {
+            if (!server.awaitTermination(5, TimeUnit.SECONDS)) {
+                server.shutdownNow();
+                server.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            server.shutdownNow();
+            Thread.currentThread().interrupt();
+        } finally {
+            dataSource.close();
+        }
+    }
+}

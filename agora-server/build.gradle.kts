@@ -34,6 +34,7 @@ dependencies {
     testImplementation(libs.testcontainers.postgresql)
     testImplementation(libs.testcontainers.junit.jupiter)
     testImplementation(libs.awaitility)
+    testImplementation(libs.logback.classic)
 }
 
 tasks.test {
