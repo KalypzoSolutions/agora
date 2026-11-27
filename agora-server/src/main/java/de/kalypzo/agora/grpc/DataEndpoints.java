@@ -2,6 +2,8 @@ package de.kalypzo.agora.grpc;
 
 import de.kalypzo.agora.auth.NodeIdentity;
 import de.kalypzo.agora.data.ReadService;
+import de.kalypzo.agora.data.UniqueViolationException;
+import de.kalypzo.agora.data.WriteService;
 import de.kalypzo.agora.index.IndexDeclarationException;
 import de.kalypzo.agora.index.IndexService;
 import de.kalypzo.agora.proto.v1.DeclareIndexResponse;
@@ -16,7 +18,7 @@ import java.sql.SQLTransientException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Registers the data RPCs on the {@link AgoraService}; the write RPCs follow with A-07. */
+/** Registers the data RPCs (reads, writes, indexes) on the {@link AgoraService}. */
 public final class DataEndpoints {
 
     private static final Logger LOG = LoggerFactory.getLogger(DataEndpoints.class);
@@ -38,6 +40,19 @@ public final class DataEndpoints {
         service.onQuery((req, out) -> reply(out, () -> reads.query(req.getTarget(), req.getSpec())));
         service.onCount((req, out) -> reply(out, () -> reads.count(req)));
         service.onVersions((req, out) -> reply(out, () -> reads.versions(req)));
+    }
+
+    /**
+     * Registers the write RPCs (A-07). A violated unique index answers {@code ALREADY_EXISTS} with the index name
+     * (E27: Pantheon does not retry it); invalid requests, folded-amount overflows and Postgres data exceptions such
+     * as a bigint overflow (22003) answer {@code INVALID_ARGUMENT}.
+     */
+    public static void registerWrites(AgoraService service, WriteService writes) {
+        service.onApply((req, out) -> reply(out, () -> writes.apply(req)));
+        service.onCreate((req, out) -> reply(out, () -> writes.create(req)));
+        service.onDelete((req, out) -> reply(out, () -> writes.delete(req)));
+        service.onExpire((req, out) -> reply(out, () -> writes.expire(req)));
+        service.onTransfer((req, out) -> reply(out, () -> writes.transfer(req)));
     }
 
     /** Registers DeclareIndex (A-08). The build may outlast the client deadline; it then continues in the background. */
@@ -76,6 +91,8 @@ public final class DataEndpoints {
             out.onCompleted();
         } catch (StatusRuntimeException e) {
             out.onError(e);
+        } catch (UniqueViolationException e) {
+            out.onError(Status.ALREADY_EXISTS.withDescription(e.index()).asRuntimeException());
         } catch (IllegalArgumentException e) {
             out.onError(Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asRuntimeException());
         } catch (SQLException e) {

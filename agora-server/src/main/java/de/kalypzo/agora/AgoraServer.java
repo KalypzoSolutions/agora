@@ -4,8 +4,10 @@ import com.zaxxer.hikari.HikariDataSource;
 import de.kalypzo.agora.auth.AuthInterceptor;
 import de.kalypzo.agora.auth.NodeTokens;
 import de.kalypzo.agora.config.AgoraConfig;
+import de.kalypzo.agora.data.ChangePublisher;
 import de.kalypzo.agora.data.HolderSink;
 import de.kalypzo.agora.data.ReadService;
+import de.kalypzo.agora.data.WriteService;
 import de.kalypzo.agora.db.Database;
 import de.kalypzo.agora.grpc.DataEndpoints;
 import de.kalypzo.agora.grpc.NodeStream;
@@ -93,6 +95,18 @@ public final class AgoraServer {
             NodeRegistry nodes,
             NodeMessageDispatcher nodeMessages,
             PresenceSnapshot presence) {
+        return start(config, service, holders, nodes, nodeMessages, presence, ChangePublisher.NOOP);
+    }
+
+    /** As above; {@code changes} receives every committed write after its commit (A-10 routes it to the holders). */
+    public static AgoraServer start(
+            AgoraConfig config,
+            AgoraService service,
+            HolderSink holders,
+            NodeRegistry nodes,
+            NodeMessageDispatcher nodeMessages,
+            PresenceSnapshot presence,
+            ChangePublisher changes) {
         NodeTokens tokens = NodeTokens.load(config.tokensFile());
         HealthStatusManager health = new HealthStatusManager();
         health.setStatus("", ServingStatus.NOT_SERVING);
@@ -105,6 +119,7 @@ public final class AgoraServer {
         try {
             Migrations.migrate(ds);
             DataEndpoints.register(service, new ReadService(ds, holders));
+            DataEndpoints.registerWrites(service, new WriteService(ds, changes));
             IndexService indexes = new IndexService(ds);
             DataEndpoints.registerIndexes(service, indexes);
             service.onConnect(new NodeStream(nodes, nodeMessages, presence, Clock.systemUTC(),

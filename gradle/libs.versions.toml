@@ -21,6 +21,7 @@ grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-services = { module = "io.grpc:grpc-services", version.ref = "grpc" }
 grpc-inprocess = { module = "io.grpc:grpc-inprocess", version.ref = "grpc" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+protobuf-java-util = { module = "com.google.protobuf:protobuf-java-util", version.ref = "protobuf" }
 tomcat-annotations-api = { module = "org.apache.tomcat:annotations-api", version.ref = "tomcat-annotations-api" }
 hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }

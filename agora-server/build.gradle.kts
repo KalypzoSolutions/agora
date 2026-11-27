@@ -19,6 +19,7 @@ dependencies {
     implementation(libs.grpc.netty.shaded)
     implementation(libs.grpc.services)
     implementation(libs.grpc.inprocess)
+    implementation(libs.protobuf.java.util)
     implementation(libs.hikaricp)
     implementation(libs.flyway.core)
     implementation(libs.flyway.database.postgresql)
