@@ -12,6 +12,7 @@ assertj = "3.27.3"
 testcontainers = "2.0.5"
 awaitility = "4.3.0"
 jib = "3.4.5"
+maven-publish = "0.37.0"
 tomcat-annotations-api = "6.0.53"
 
 [libraries]
@@ -41,3 +42,4 @@ awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" 
 [plugins]
 protobuf = { id = "com.google.protobuf", version.ref = "protobuf-plugin" }
 jib = { id = "com.google.cloud.tools.jib", version.ref = "jib" }
+maven-publish = { id = "com.vanniktech.maven.publish", version.ref = "maven-publish" }

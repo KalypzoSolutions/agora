@@ -42,6 +42,7 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// Not on Maven Central (it ships as a Docker image); publishToMavenLocal serves Pantheon's integration tests and CI.
 publishing {
     publications {
         create<MavenPublication>("maven") { from(components["java"]) }
@@ -50,7 +51,7 @@ publishing {
 
 jib {
     from { image = "eclipse-temurin:25-jre" }
-    to { image = "agora:0.1.0-SNAPSHOT" }
+    to { image = "agora:${project.version}" }
     container {
         mainClass = "de.kalypzo.agora.Main"
         ports = listOf("9090")

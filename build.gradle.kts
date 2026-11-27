@@ -1,6 +1,6 @@
 allprojects {
-    group = "de.kalypzo.agora"
-    version = "0.1.0-SNAPSHOT"
+    group = "de.kalypzo"
+    // version: gradle.properties; CI release overrides it with -Pversion=<tag without "v">
     repositories {
         mavenCentral()
     }
