@@ -18,6 +18,8 @@ service Agora {
   rpc Expire        (ExpireRequest)        returns (ExpireResponse);
   rpc Transfer      (TransferRequest)      returns (TransferResponse);
   rpc DeclareIndex  (DeclareIndexRequest)  returns (DeclareIndexResponse);
+  rpc AppendAudit   (AuditBundle)          returns (AppendAuditResponse);
+  rpc Timeline      (TimelineRequest)      returns (TimelineResponse);
 }
 
 // ---------- Werte ----------
@@ -173,3 +175,54 @@ message Welcome      { repeated PresenceEntry presence = 1; }
 message PresenceChanged { oneof change { PresenceEntry upsert = 1; string removed = 2; } }
 message DocChanged { RowRef ref = 1; int64 version = 2; bool deleted = 3;
                      map<string, Value> data = 4; string idempotency_key = 5; }       // E4
+
+// ---------- Audit (audit_log.md §8, E28: UUIDs als bytes, 16 Byte Big Endian) ----------
+message AuditBundle {
+  repeated AuditEntry entries = 1;
+  uint64              dropped = 2;   // seit dem letzten Bündel verworfen
+}
+
+message AuditEntry {
+  bytes                   id       = 1;   // UUIDv7, 16 Byte, enthält den Zeitpunkt
+  bytes                   player   = 2;   // UUID, 16 Byte
+  string                  action   = 3;   // 'shop:buy'
+  optional AuditLocation  location = 4;
+  optional bytes          target   = 5;
+  map<string, AuditValue> with     = 6;
+  optional bytes          trace    = 7;   // UUIDv7, 16 Byte
+}
+
+message AuditLocation { string world = 1; double x = 2; double y = 3; double z = 4; }
+
+message AuditValue {
+  oneof value { string s = 1; int64 l = 2; double d = 3; bool b = 4; }
+}
+
+message AppendAuditResponse {}
+
+message TimelineRequest {
+  bytes           player      = 1;
+  int64           from_millis = 2;
+  int64           to_millis   = 3;
+  repeated string actions     = 4;   // 'shop:buy' oder ganzer Namespace 'shop:*'; leer = alle
+  uint32          limit       = 5;   // höchstens 500
+  optional bytes  cursor      = 6;   // id des letzten Eintrags der vorigen Seite
+  optional bytes  trace       = 7;   // nur Einträge dieser Trace
+  AuditViewer     viewer      = 8;   // Pflicht: wer liest
+}
+
+message AuditViewer {
+  optional bytes player = 1;   // UUID des Teammitglieds, falls bekannt
+  string         name   = 2;   // Anzeigename, z. B. 'Notch', 'console' oder ein Web-Login
+  string         via    = 3;   // 'command', 'web', …
+}
+
+message TimelineResponse {
+  repeated StoredAuditEntry entries = 1;   // neueste zuerst
+  optional bytes            cursor  = 2;   // leer = keine weiteren Einträge
+}
+
+message StoredAuditEntry {
+  AuditEntry entry  = 1;
+  string     server = 2;
+}

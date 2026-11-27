@@ -25,6 +25,8 @@ public final class AgoraService extends AgoraGrpc.AgoraImplBase {
     private volatile RpcHandler<ExpireRequest, ExpireResponse> expire;
     private volatile RpcHandler<TransferRequest, TransferResponse> transfer;
     private volatile RpcHandler<DeclareIndexRequest, DeclareIndexResponse> declareIndex;
+    private volatile RpcHandler<AuditBundle, AppendAuditResponse> appendAudit;
+    private volatile RpcHandler<TimelineRequest, TimelineResponse> timeline;
 
     public AgoraService onConnect(ConnectHandler handler) {
         this.connect = handler;
@@ -191,5 +193,29 @@ public final class AgoraService extends AgoraGrpc.AgoraImplBase {
         RpcHandler<DeclareIndexRequest, DeclareIndexResponse> h = declareIndex;
         if (h != null) h.handle(request, out);
         else super.declareIndex(request, out);
+    }
+
+    public AgoraService onAppendAudit(RpcHandler<AuditBundle, AppendAuditResponse> handler) {
+        this.appendAudit = handler;
+        return this;
+    }
+
+    @Override
+    public void appendAudit(AuditBundle request, StreamObserver<AppendAuditResponse> out) {
+        RpcHandler<AuditBundle, AppendAuditResponse> h = appendAudit;
+        if (h != null) h.handle(request, out);
+        else super.appendAudit(request, out);
+    }
+
+    public AgoraService onTimeline(RpcHandler<TimelineRequest, TimelineResponse> handler) {
+        this.timeline = handler;
+        return this;
+    }
+
+    @Override
+    public void timeline(TimelineRequest request, StreamObserver<TimelineResponse> out) {
+        RpcHandler<TimelineRequest, TimelineResponse> h = timeline;
+        if (h != null) h.handle(request, out);
+        else super.timeline(request, out);
     }
 }

@@ -6,7 +6,11 @@ import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.EnumDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
+import com.google.protobuf.ByteString;
 import de.kalypzo.agora.proto.v1.AgoraOuterClass;
+import de.kalypzo.agora.proto.v1.AuditEntry;
+import de.kalypzo.agora.proto.v1.AuditLocation;
+import de.kalypzo.agora.proto.v1.AuditValue;
 import de.kalypzo.agora.proto.v1.DocChanged;
 import de.kalypzo.agora.proto.v1.PlayerRow;
 import de.kalypzo.agora.proto.v1.RowRef;
@@ -41,6 +45,38 @@ class ProtoContractTest {
                 .build();
         DocChanged parsed = DocChanged.parseFrom(original.toByteArray());
         assertThat(parsed).isEqualTo(original);
+    }
+
+    @Test
+    void auditEntryRoundTrip() throws Exception {
+        AuditEntry original = AuditEntry.newBuilder()
+                .setId(bytes16(1))
+                .setPlayer(bytes16(2))
+                .setAction("shop:buy")
+                .setLocation(AuditLocation.newBuilder().setWorld("world").setX(1.5).setY(64).setZ(-3.25))
+                .setTarget(bytes16(3))
+                .putWith("item", AuditValue.newBuilder().setS("diamond").build())
+                .putWith("amount", AuditValue.newBuilder().setL(Long.MIN_VALUE).build())
+                .putWith("price", AuditValue.newBuilder().setD(12.5).build())
+                .putWith("gift", AuditValue.newBuilder().setB(true).build())
+                .setTrace(bytes16(4))
+                .build();
+        AuditEntry parsed = AuditEntry.parseFrom(original.toByteArray());
+        assertThat(parsed).isEqualTo(original);
+        assertThat(parsed.getWithMap()).hasSize(4);
+        assertThat(parsed.getWithMap().get("item").getValueCase()).isEqualTo(AuditValue.ValueCase.S);
+        assertThat(parsed.getWithMap().get("amount").getValueCase()).isEqualTo(AuditValue.ValueCase.L);
+        assertThat(parsed.getWithMap().get("price").getValueCase()).isEqualTo(AuditValue.ValueCase.D);
+        assertThat(parsed.getWithMap().get("gift").getValueCase()).isEqualTo(AuditValue.ValueCase.B);
+        assertThat(parsed.hasLocation()).isTrue();
+        assertThat(parsed.hasTarget()).isTrue();
+        assertThat(parsed.hasTrace()).isTrue();
+    }
+
+    private static ByteString bytes16(int seed) {
+        byte[] b = new byte[16];
+        for (int i = 0; i < 16; i++) b[i] = (byte) (seed * 16 + i);
+        return ByteString.copyFrom(b);
     }
 
     @Test
