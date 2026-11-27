@@ -13,9 +13,10 @@ import de.kalypzo.agora.proto.v1.WatchStore;
 
 /**
  * One method per {@code NodeMessage} payload (R5). Every method defaults to a no-op, so a component overrides only
- * what it handles. Methods are called on the stream's callback thread, in the order the node sent the messages; a
- * listener that blocks or goes async must not hold that thread (and must capture what it needs from the gRPC
- * context first).
+ * what it handles. Methods are called on the node's serial lane ({@link NodeRegistry#serialize}), off the stream
+ * thread, in the order the node sent the messages; messages of a superseded session are no longer delivered. A
+ * listener that blocks holds up only that node's lane, but should still not wait long; the gRPC context is not
+ * available there.
  */
 public interface NodeMessageListener {
 

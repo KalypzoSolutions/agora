@@ -78,6 +78,21 @@ public final class AgoraServer {
 
     /** {@code holders} receives the LoadPlayer claims (A-10 passes the holder registry; until then a no-op). */
     public static AgoraServer start(AgoraConfig config, AgoraService service, HolderSink holders) {
+        return start(config, service, holders, new NodeRegistry(), new NodeMessageDispatcher(), PresenceSnapshot.EMPTY);
+    }
+
+    /**
+     * Full wiring: {@code nodes} and {@code nodeMessages} can be built by the caller first, so that components that
+     * need them (A-10 holders, A-11 presence) exist before the server starts; {@code presence} provides the
+     * {@code Welcome} snapshot (A-11).
+     */
+    public static AgoraServer start(
+            AgoraConfig config,
+            AgoraService service,
+            HolderSink holders,
+            NodeRegistry nodes,
+            NodeMessageDispatcher nodeMessages,
+            PresenceSnapshot presence) {
         NodeTokens tokens = NodeTokens.load(config.tokensFile());
         HealthStatusManager health = new HealthStatusManager();
         health.setStatus("", ServingStatus.NOT_SERVING);
@@ -92,10 +107,7 @@ public final class AgoraServer {
             DataEndpoints.register(service, new ReadService(ds, holders));
             IndexService indexes = new IndexService(ds);
             DataEndpoints.registerIndexes(service, indexes);
-            NodeRegistry nodes = new NodeRegistry();
-            NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
-            // A-11 replaces the empty snapshot with the presence service.
-            service.onConnect(new NodeStream(nodes, nodeMessages, PresenceSnapshot.EMPTY, Clock.systemUTC(),
+            service.onConnect(new NodeStream(nodes, nodeMessages, presence, Clock.systemUTC(),
                     scheduler, config.paperWelcomeDelay(), NodeSession.DEFAULT_QUEUE_LIMIT));
             Server server = NettyServerBuilder.forPort(config.port())
                     .keepAliveTime(10, TimeUnit.SECONDS)

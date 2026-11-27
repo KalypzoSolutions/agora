@@ -44,6 +44,10 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
@@ -73,6 +77,7 @@ class NodeStreamTest {
     final List<NodeSession> gone = new CopyOnWriteArrayList<>();
     final List<Client> clients = new ArrayList<>();
     ScheduledExecutorService scheduler;
+    ExecutorService lanes;
     NodeRegistry registry;
     NodeMessageDispatcher dispatcher;
     NodeStream stream;
@@ -83,7 +88,8 @@ class NodeStreamTest {
     @BeforeEach
     void setUp() {
         scheduler = Executors.newSingleThreadScheduledExecutor();
-        registry = new NodeRegistry();
+        lanes = Executors.newVirtualThreadPerTaskExecutor();
+        registry = new NodeRegistry(lanes);
         registry.onNodeGone(gone::add);
         dispatcher = new NodeMessageDispatcher();
     }
@@ -112,6 +118,12 @@ class NodeStreamTest {
         if (channel != null) channel.shutdownNow();
         if (server != null) server.shutdownNow();
         scheduler.shutdownNow();
+        lanes.shutdownNow();
+    }
+
+    /** Waits until every lifecycle/message task queued so far for {@code nodeId} has run. */
+    void flush(String nodeId) throws Exception {
+        registry.serialize(nodeId, () -> {}).get(5, TimeUnit.SECONDS);
     }
 
     // ---------- tests ----------
@@ -166,7 +178,10 @@ class NodeStreamTest {
         assertThat(secondSession).isNotSameAs(firstSession);
         assertThat(registry.all()).containsExactly(secondSession);
         // R2: ending the replaced session is not node-gone for the new one.
+        flush("paper-1");
         assertThat(gone).isEmpty();
+        assertThat(registry.isSuperseded(firstSession)).isTrue();
+        assertThat(registry.isSuperseded(secondSession)).isFalse();
     }
 
     @Test
@@ -183,6 +198,7 @@ class NodeStreamTest {
 
         // The old session reports its end once more (e.g. late peer close): still no node-gone, new one stays.
         firstSession.close(Status.CANCELLED);
+        flush("paper-1");
         assertThat(gone).isEmpty();
         assertThat(registry.get("paper-1")).isPresent();
 
@@ -216,6 +232,7 @@ class NodeStreamTest {
         Client c = client("paper-1", "tok-paper", -1);
         c.hello("paper-1", NodeKind.PAPER);
         await().atMost(Duration.ofSeconds(5)).until(() -> registry.get("paper-1").isPresent());
+        flush("paper-1");
         stream.tick();
         // Other messages flow normally before the Welcome.
         registry.get("paper-1").orElseThrow().send(
@@ -262,7 +279,7 @@ class NodeStreamTest {
         assertThat(c.next().hasWelcome()).isTrue();
         registry.shutdown(Status.UNAVAILABLE.withDescription("shutting down"));
         assertThat(c.status()).isEqualTo(Status.Code.UNAVAILABLE);
-        Thread.sleep(100);
+        flush("velocity-1");
         assertThat(gone).isEmpty();
         Client late = client("paper-1", "tok-paper", -1);
         late.hello("paper-1", NodeKind.PAPER);
@@ -308,6 +325,82 @@ class NodeStreamTest {
         assertThat(hellos.getFirst().getHeldPlayersList()).containsExactly(ALICE.getPlayer());
         assertThat(hellos.getFirst().getWatchedStoresList()).containsExactly("eco:shops");
         assertThat(hellos.getFirst().getPlayersList()).containsExactly(ALICE);
+    }
+
+    @Test
+    void nodeGoneOfOldSessionRacingNewHelloLeavesNewStateUntouched() throws Exception {
+        start();
+        // A downstream component in the style of A-10: holders per node, set by Hello, removed by node-gone.
+        Map<String, List<String>> holders = new ConcurrentHashMap<>();
+        dispatcher.addHelloListener((s, h) -> holders.put(s.nodeId(), List.copyOf(h.getHeldPlayersList())));
+        List<Boolean> supersededSeen = new CopyOnWriteArrayList<>();
+        registry.onNodeGone(s -> {
+            supersededSeen.add(registry.isSuperseded(s));
+            if (!registry.isSuperseded(s)) holders.remove(s.nodeId());
+        });
+
+        Client old = client("paper-1", "tok-paper", -1);
+        old.send(NodeMessage.newBuilder().setHello(Hello.newBuilder()
+                .setNodeId("paper-1").setKind(NodeKind.PAPER).addHeldPlayers("old-player")).build());
+        assertThat(old.next().hasWelcome()).isTrue();
+        NodeSession oldSession = registry.get("paper-1").orElseThrow();
+
+        // Hold the lane of paper-1, so node-gone(old) is queued but cannot run yet.
+        CountDownLatch release = new CountDownLatch(1);
+        registry.serialize("paper-1", () -> {
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        old.cancel();
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.get("paper-1").isEmpty());
+
+        // The node reconnects before node-gone(old) ran: no previous session to replace.
+        Client fresh = client("paper-1", "tok-paper", -1);
+        fresh.send(NodeMessage.newBuilder().setHello(Hello.newBuilder()
+                .setNodeId("paper-1").setKind(NodeKind.PAPER).addHeldPlayers("new-player")).build());
+        await().atMost(Duration.ofSeconds(5)).until(() -> registry.get("paper-1").isPresent());
+        assertThat(registry.isSuperseded(oldSession)).isTrue();
+
+        release.countDown();
+        assertThat(fresh.next().hasWelcome()).isTrue();
+        flush("paper-1");
+        // The superseded node-gone was dropped (R2); a listener that defers work can check isSuperseded itself.
+        assertThat(gone).isEmpty();
+        assertThat(supersededSeen).isEmpty();
+        assertThat(holders).containsExactly(Map.entry("paper-1", List.of("new-player")));
+    }
+
+    @Test
+    void overflowRunsNodeGoneOffTheSenderAndOutsideTheSessionLock() throws Exception {
+        start(Duration.ZERO, 3);
+        Client velocity = client("velocity-1", "tok-velocity", -1);
+        velocity.hello("velocity-1", NodeKind.VELOCITY);
+        assertThat(velocity.next().hasWelcome()).isTrue();
+        Client paper = client("paper-1", "tok-paper", 1);
+        paper.hello("paper-1", NodeKind.PAPER);
+        assertThat(paper.next().hasWelcome()).isTrue();
+        NodeSession slow = registry.get("paper-1").orElseThrow();
+        NodeSession proxy = registry.get("velocity-1").orElseThrow();
+
+        CompletableFuture<Thread> listenerThread = new CompletableFuture<>();
+        CompletableFuture<Boolean> heldLock = new CompletableFuture<>();
+        registry.onNodeGone(s -> {
+            heldLock.complete(Thread.holdsLock(s));
+            // Broadcast to another session from inside node-gone (as A-11 will do).
+            proxy.send(ServiceMessage.newBuilder().setDocChanged(DocChanged.newBuilder().setVersion(42)).build());
+            listenerThread.complete(Thread.currentThread());
+        });
+        ServiceMessage change = ServiceMessage.newBuilder().setDocChanged(DocChanged.newBuilder().setVersion(1)).build();
+        for (int i = 0; i < 3; i++) assertThat(slow.send(change)).isTrue();
+        assertThat(slow.send(change)).isFalse();
+        assertThat(paper.status()).isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
+
+        assertThat(listenerThread.get(5, TimeUnit.SECONDS)).isNotSameAs(Thread.currentThread());
+        assertThat(heldLock.get()).isFalse();
+        assertThat(velocity.next().getDocChanged().getVersion()).isEqualTo(42);
     }
 
     // ---------- helpers ----------

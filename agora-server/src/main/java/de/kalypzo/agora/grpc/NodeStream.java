@@ -21,17 +21,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * The {@code Connect} stream (agora §3): Hello/Welcome handshake, session registration and dispatch of every further
- * {@code NodeMessage} to the {@link NodeMessageDispatcher}. Register with {@code AgoraService.onConnect(stream)}.
+ * {@code NodeMessage} to the {@link NodeMessageDispatcher} (on the node's lane, in arrival order; messages of a
+ * superseded session are dropped). Register with {@code AgoraService.onConnect(stream)}.
  *
  * <p>Rules: the first message must be {@code Hello} ({@code INVALID_ARGUMENT} otherwise) and its {@code node_id}
  * must be the authenticated node ({@code PERMISSION_DENIED}). After {@code Hello} the session is registered, the
- * hello listeners run, and {@code Welcome} with the presence snapshot is sent: to VELOCITY nodes at once, to PAPER
+ * hello listeners run on the node's lane ({@link NodeRegistry#serialize}), and {@code Welcome} with the presence
+ * snapshot is sent: to VELOCITY nodes at once, to PAPER
  * nodes no earlier than {@code startedAt + paperWelcomeDelay} (E11, R1). Until then all other messages flow normally.
  *
  * <p>Pending PAPER welcomes are released by {@link #tick()}, which runs on the injected scheduler when the warm-up
@@ -49,6 +52,7 @@ public final class NodeStream implements ConnectHandler {
     private final int queueLimit;
     private final Instant welcomePaperAt;
     private final ConcurrentHashMap<NodeSession, Boolean> pendingWelcomes = new ConcurrentHashMap<>();
+    private final AtomicBoolean tickScheduled = new AtomicBoolean();
 
     public NodeStream(
             NodeRegistry registry,
@@ -96,8 +100,13 @@ public final class NodeStream implements ConnectHandler {
                     }
                     session.set(s);
                     registry.register(s);
-                    dispatcher.dispatch(s, m);
-                    welcome(s);
+                    if (!s.isOpen()) return; // rejected by register (shutdown race)
+                    NodeSession accepted = s;
+                    registry.serialize(s.nodeId(), () -> {
+                        if (!accepted.isOpen() || registry.isSuperseded(accepted)) return;
+                        dispatcher.dispatch(accepted, m);
+                        welcome(accepted);
+                    });
                     return;
                 }
                 if (m.hasHello()) {
@@ -105,7 +114,10 @@ public final class NodeStream implements ConnectHandler {
                     return;
                 }
                 if (!s.isOpen()) return;
-                dispatcher.dispatch(s, m);
+                NodeSession current = s;
+                registry.serialize(s.nodeId(), () -> {
+                    if (!registry.isSuperseded(current)) dispatcher.dispatch(current, m);
+                });
             }
 
             @Override
@@ -152,6 +164,7 @@ public final class NodeStream implements ConnectHandler {
             Instant now = clock.instant();
             if (now.isBefore(welcomePaperAt)) {
                 pendingWelcomes.put(s, Boolean.TRUE);
+                s.closeFuture().whenComplete((st, e) -> pendingWelcomes.remove(s));
                 scheduleTick(Duration.between(now, welcomePaperAt));
                 LOG.debug("Welcome for '{}' waits for the warm-up until {}", s.nodeId(), welcomePaperAt);
                 return;
@@ -162,6 +175,7 @@ public final class NodeStream implements ConnectHandler {
 
     /** Sends the pending PAPER welcomes once the warm-up is over (R24 test hook). */
     public void tick() {
+        tickScheduled.set(false);
         if (pendingWelcomes.isEmpty()) return;
         Instant now = clock.instant();
         if (now.isBefore(welcomePaperAt)) {
@@ -174,9 +188,11 @@ public final class NodeStream implements ConnectHandler {
     }
 
     private void scheduleTick(Duration delay) {
+        if (!tickScheduled.compareAndSet(false, true)) return; // one scheduled tick serves all pending welcomes
         try {
             scheduler.schedule(this::tick, Math.max(1, delay.toMillis()), TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
+            tickScheduled.set(false);
             LOG.debug("Scheduler stopped, welcome tick not scheduled");
         }
     }

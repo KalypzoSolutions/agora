@@ -44,18 +44,20 @@ public final class NodeMessageDispatcher {
     }
 
     private static void deliver(NodeMessageListener l, NodeSession s, NodeMessage m) {
-        switch (m.getPayloadCase()) {
-            case HELLO -> l.onHello(s, m.getHello());
-            case HEARTBEAT -> l.onHeartbeat(s, m.getHeartbeat());
-            case WATCH_STORE -> l.onWatchStore(s, m.getWatchStore());
-            case UNWATCH_STORE -> l.onUnwatchStore(s, m.getUnwatchStore());
-            case KICK_RESULT -> l.onKickResult(s, m.getKickResult());
-            case PLAYER_SWITCHED -> l.onPlayerSwitched(s, m.getPlayerSwitched());
-            case PLAYER_LEFT -> l.onPlayerLeft(s, m.getPlayerLeft());
-            case LOCATION_REPLY -> l.onLocationReply(s, m.getLocationReply());
-            case SEND_DELIVERY -> l.onSendDelivery(s, m.getSendDelivery());
-            case RELEASE_PLAYER -> l.onReleasePlayer(s, m.getReleasePlayer());
-            case PAYLOAD_NOT_SET -> {}
-        }
+        // Switch expression: a new payload in the proto fails to compile here until it is routed (R5).
+        Runnable call = switch (m.getPayloadCase()) {
+            case HELLO -> () -> l.onHello(s, m.getHello());
+            case HEARTBEAT -> () -> l.onHeartbeat(s, m.getHeartbeat());
+            case WATCH_STORE -> () -> l.onWatchStore(s, m.getWatchStore());
+            case UNWATCH_STORE -> () -> l.onUnwatchStore(s, m.getUnwatchStore());
+            case KICK_RESULT -> () -> l.onKickResult(s, m.getKickResult());
+            case PLAYER_SWITCHED -> () -> l.onPlayerSwitched(s, m.getPlayerSwitched());
+            case PLAYER_LEFT -> () -> l.onPlayerLeft(s, m.getPlayerLeft());
+            case LOCATION_REPLY -> () -> l.onLocationReply(s, m.getLocationReply());
+            case SEND_DELIVERY -> () -> l.onSendDelivery(s, m.getSendDelivery());
+            case RELEASE_PLAYER -> () -> l.onReleasePlayer(s, m.getReleasePlayer());
+            case PAYLOAD_NOT_SET -> () -> {};
+        };
+        call.run();
     }
 }
