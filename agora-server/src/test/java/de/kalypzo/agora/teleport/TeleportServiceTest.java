@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -74,7 +75,7 @@ class TeleportServiceTest {
         arrived(lobby2, p.getRequestId());
 
         assertThat(status(f)).isEqualTo(TeleportStatus.OK);
-        assertThat(lobby2.drained(ServiceMessage::hasCancelArrival)).isEmpty();
+        noCancelBeforeNextPrepare();
     }
 
     @Test
@@ -88,7 +89,7 @@ class TeleportServiceTest {
         // The late FAILED changes nothing.
         connectResult(id, ConnectStatus.FAILED);
         agora.processed(proxy);
-        assertThat(lobby2.drained(ServiceMessage::hasCancelArrival)).isEmpty();
+        noCancelBeforeNextPrepare();
     }
 
     @Test
@@ -121,7 +122,7 @@ class TeleportServiceTest {
         CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
         prepared(lobby2, prepareAt(lobby2).getRequestId(), ArrivalStatus.ARRIVAL_WORLD_NOT_FOUND);
         assertThat(status(f)).isEqualTo(TeleportStatus.WORLD_NOT_FOUND);
-        assertThat(proxy.drained(ServiceMessage::hasConnectPlayer)).isEmpty();
+        noConnectBeforeNext(ServiceMessage::hasConnectPlayer);
     }
 
     @Test
@@ -146,7 +147,7 @@ class TeleportServiceTest {
         assertThat(f).isNotDone();
         arrived(lobby2, id);
         assertThat(status(f)).isEqualTo(TeleportStatus.OK);
-        assertThat(proxy.drained(ServiceMessage::hasConnectPlayer)).isEmpty();
+        noConnectBeforeNext(ServiceMessage::hasConnectPlayer);
     }
 
     @Test
@@ -155,10 +156,11 @@ class TeleportServiceTest {
         CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
         String id = prepareAt(lobby2).getRequestId();
         arrived(lobby2, id);
-        prepared(lobby2, id, ArrivalStatus.ALREADY_HERE);
+        // The late READY falls under AR-12: no ConnectPlayer for an ended teleport.
+        prepared(lobby2, id, ArrivalStatus.READY);
         assertThat(status(f)).isEqualTo(TeleportStatus.OK);
         agora.processed(lobby2);
-        assertThat(proxy.drained(ServiceMessage::hasConnectPlayer)).isEmpty();
+        noConnectBeforeNext(ServiceMessage::hasConnectPlayer);
     }
 
     @Test
@@ -203,14 +205,15 @@ class TeleportServiceTest {
     void offlineIsNotOnline() throws Exception {
         start();
         assertThat(status(teleport(ALEX, "lobby-02", WHERE2))).isEqualTo(TeleportStatus.NOT_ONLINE);
-        assertThat(lobby2.drained(ServiceMessage::hasPrepareArrival)).isEmpty();
+        noPrepareBeforeNext(STEVE);
     }
 
     @Test
     void noServerYetIsNotOnline() throws Exception {
         start(entry(STEVE, ""));
+        agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-01"));
         assertThat(status(teleport(STEVE, "lobby-02", WHERE2))).isEqualTo(TeleportStatus.NOT_ONLINE);
-        assertThat(lobby2.drained(ServiceMessage::hasPrepareArrival)).isEmpty();
+        noPrepareBeforeNext(ALEX);
     }
 
     @Test
@@ -223,7 +226,7 @@ class TeleportServiceTest {
     void velocityTargetIsUnavailable() throws Exception {
         start();
         assertThat(status(teleport(STEVE, "proxy-01", null))).isEqualTo(TeleportStatus.SERVER_UNAVAILABLE);
-        assertThat(proxy.drained(ServiceMessage::hasPrepareArrival)).isEmpty();
+        noConnectBeforeNext(ServiceMessage::hasPrepareArrival);
     }
 
     @Test
@@ -241,11 +244,14 @@ class TeleportServiceTest {
     @Test
     void connectTimeout() throws Exception {
         start();
-        long t0 = System.nanoTime();
         CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
-        String id = readyAndConnect();
+        String id = prepareAt(lobby2).getRequestId();
+        long ready = System.nanoTime();
+        prepared(lobby2, id, ArrivalStatus.READY);
+        proxy.nextMatching(ServiceMessage::hasConnectPlayer);
         assertThat(status(f)).isEqualTo(TeleportStatus.TIMEOUT);
-        assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofSeconds(2));
+        // The connect timer (800 ms), not the arrival timer (1200 ms).
+        assertThat(Duration.ofNanos(System.nanoTime() - ready)).isLessThan(Duration.ofMillis(1100));
         assertThat(cancelAt(lobby2).getRequestId()).isEqualTo(id);
     }
 
@@ -253,9 +259,14 @@ class TeleportServiceTest {
     void arrivalTimeout() throws Exception {
         start();
         CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
-        String id = readyAndConnect();
+        String id = prepareAt(lobby2).getRequestId();
+        long ready = System.nanoTime();
+        prepared(lobby2, id, ArrivalStatus.READY);
+        proxy.nextMatching(ServiceMessage::hasConnectPlayer);
         connectResult(id, ConnectStatus.CONNECTED);
         assertThat(status(f)).isEqualTo(TeleportStatus.TIMEOUT);
+        // CONNECTED stopped the connect timer (800 ms): the arrival timer (1200 ms) ended it.
+        assertThat(Duration.ofNanos(System.nanoTime() - ready)).isGreaterThanOrEqualTo(Duration.ofMillis(1100));
     }
 
     @Test
@@ -281,7 +292,7 @@ class TeleportServiceTest {
         CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
         prepared(lobby1, prepareAt(lobby2).getRequestId(), ArrivalStatus.READY);
         assertThat(status(f)).isEqualTo(TeleportStatus.TIMEOUT);
-        assertThat(proxy.drained(ServiceMessage::hasConnectPlayer)).isEmpty();
+        noConnectBeforeNext(ServiceMessage::hasConnectPlayer);
     }
 
     @Test
@@ -318,6 +329,35 @@ class TeleportServiceTest {
         assertThat(proxy.nextMatching(ServiceMessage::hasConnectPlayer).getConnectPlayer().getRequestId())
                 .isEqualTo(id);
         return id;
+    }
+
+    /**
+     * FIFO barrier on lobby-02: a new teleport's PrepareArrival must arrive before any CancelArrival, since a Cancel
+     * of the earlier teleport would have been sent on the same session first.
+     */
+    void noCancelBeforeNextPrepare() throws Exception {
+        teleport(STEVE, "lobby-02", WHERE2);
+        assertThat(lobby2.nextMatching(m -> m.hasCancelArrival() || m.hasPrepareArrival()).hasPrepareArrival())
+                .isTrue();
+    }
+
+    /** FIFO barrier on lobby-02: the next PrepareArrival is the one of a new teleport of {@code barrier}. */
+    void noPrepareBeforeNext(String barrier) throws Exception {
+        teleport(barrier, "lobby-02", WHERE2);
+        assertThat(prepareAt(lobby2).getPlayer()).isEqualTo(barrier);
+    }
+
+    /**
+     * FIFO barrier on the proxy: a new teleport's ConnectPlayer must be the first message matching
+     * {@code unwanted} or ConnectPlayer.
+     */
+    void noConnectBeforeNext(Predicate<ServiceMessage> unwanted) throws Exception {
+        teleport(STEVE, "lobby-02", WHERE2);
+        String id = prepareAt(lobby2).getRequestId();
+        prepared(lobby2, id, ArrivalStatus.READY);
+        ServiceMessage m = proxy.nextMatching(x -> unwanted.test(x) || x.hasConnectPlayer());
+        assertThat(m.hasConnectPlayer()).isTrue();
+        assertThat(m.getConnectPlayer().getRequestId()).isEqualTo(id);
     }
 
     static PrepareArrival prepareAt(Client c) throws Exception {
