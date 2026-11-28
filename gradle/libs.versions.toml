@@ -1,6 +1,6 @@
 [versions]
 grpc = "1.74.0"
-protobuf = "3.25.5"
+protobuf = "3.25.9"
 protobuf-plugin = "0.10.1"
 hikaricp = "7.1.0"
 flyway = "12.11.0"
