@@ -3,11 +3,17 @@ package de.kalypzo.agora.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 class AgoraConfigTest {
 
@@ -60,5 +66,53 @@ class AgoraConfigTest {
     @Test
     void toStringMasksPassword() {
         assertThat(AgoraConfig.fromEnv(base()).toString()).doesNotContain("s3cret-pw").contains("dbUrl");
+    }
+
+    @Test
+    void teleportTimeoutsDefault() {
+        AgoraConfig c = AgoraConfig.fromEnv(base());
+        assertThat(c.teleport()).isEqualTo(AgoraConfig.TeleportTimeouts.DEFAULT);
+        assertThat(AgoraConfig.TeleportTimeouts.DEFAULT.total()).isEqualTo(Duration.ofSeconds(38));
+    }
+
+    @Test
+    void teleportTimeoutsFromEnv() {
+        Map<String, String> env = base();
+        env.put("AGORA_TELEPORT_ARRIVAL_MS", "2500");
+        assertThat(AgoraConfig.fromEnv(env).teleport().arrival()).isEqualTo(Duration.ofMillis(2500));
+    }
+
+    @Test
+    void teleportTimeoutsBeyondPantheonLimitsWarnOnce() {
+        Map<String, String> env = base();
+        env.put("AGORA_TELEPORT_ARRIVAL_MS", "33000"); // 3 s + 33 s >= 35 s
+        env.put("AGORA_TELEPORT_TOTAL_MS", "40000");
+        assertThat(warnings(env)).singleElement().asString().contains("35", "40");
+    }
+
+    @Test
+    void defaultTeleportTimeoutsDoNotWarn() {
+        assertThat(warnings(base())).isEmpty();
+    }
+
+    private static List<String> warnings(Map<String, String> env) {
+        Logger logger = (Logger) LoggerFactory.getLogger(AgoraConfig.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            AgoraConfig.fromEnv(env);
+        } finally {
+            logger.detachAppender(appender);
+        }
+        return appender.list.stream().filter(e -> e.getLevel() == Level.WARN).map(ILoggingEvent::getFormattedMessage)
+                .toList();
+    }
+
+    @Test
+    void teleportTimeoutRejectsZero() {
+        Map<String, String> env = base();
+        env.put("AGORA_TELEPORT_PREPARE_MS", "0");
+        assertThatThrownBy(() -> AgoraConfig.fromEnv(env)).isInstanceOf(IllegalArgumentException.class);
     }
 }

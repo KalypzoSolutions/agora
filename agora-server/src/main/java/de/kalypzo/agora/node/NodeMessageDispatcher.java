@@ -57,6 +57,10 @@ public final class NodeMessageDispatcher {
             case SEND_DELIVERY -> () -> l.onSendDelivery(s, m.getSendDelivery());
             case RELEASE_PLAYER -> () -> l.onReleasePlayer(s, m.getReleasePlayer());
             case BARRIER -> () -> l.onBarrier(s, m.getBarrier());
+            case ARRIVAL_PREPARED -> () -> l.onArrivalPrepared(s, m.getArrivalPrepared());
+            case PLAYER_ARRIVED -> () -> l.onPlayerArrived(s, m.getPlayerArrived());
+            case ARRIVAL_FAILED -> () -> l.onArrivalFailed(s, m.getArrivalFailed());
+            case CONNECT_RESULT -> () -> l.onConnectResult(s, m.getConnectResult());
             case PAYLOAD_NOT_SET -> () -> {};
         };
         call.run();

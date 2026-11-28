@@ -34,6 +34,7 @@ import de.kalypzo.agora.presence.PresenceSnapshot;
 import de.kalypzo.agora.index.IndexService;
 import de.kalypzo.agora.db.Migrations;
 import de.kalypzo.agora.service.AgoraService;
+import de.kalypzo.agora.teleport.TeleportService;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
@@ -113,7 +114,7 @@ public final class AgoraServer {
         NodeRegistry nodes = new NodeRegistry();
         NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
         PresenceService presence = new PresenceService(nodes);
-        wirePresence(service, presence, nodes, nodeMessages);
+        wirePresence(service, presence, nodes, nodeMessages, config.teleport());
         HolderRegistry holders = new HolderRegistry(nodes);
         holders.install(nodeMessages);
         return start(config, service, holders, nodes, nodeMessages, presence, holders);
@@ -128,7 +129,7 @@ public final class AgoraServer {
         NodeRegistry nodes = new NodeRegistry();
         NodeMessageDispatcher nodeMessages = new NodeMessageDispatcher();
         PresenceService presence = new PresenceService(nodes);
-        wirePresence(service, presence, nodes, nodeMessages);
+        wirePresence(service, presence, nodes, nodeMessages, config.teleport());
         return start(config, service, holders, nodes, nodeMessages, presence);
     }
 
@@ -138,8 +139,8 @@ public final class AgoraServer {
      * {@code Welcome} snapshot (A-11). This overload does not wire the presence handlers: a caller passing a
      * {@code PresenceService} also calls {@code presence.install(nodeMessages)} and
      * {@code PresenceEndpoints.register(service, presence, nodes)}, otherwise ClaimPresence stays UNIMPLEMENTED (see
-     * {@link #start(AgoraConfig, AgoraService, HolderSink)}); {@link #wirePresence} does both plus delivery and locate
-     * (A-12) in one call.
+     * {@link #start(AgoraConfig, AgoraService, HolderSink)}); {@link #wirePresence} does both plus delivery, locate
+     * and teleport (A-12) in one call.
      *
      * <p>Changes are always routed (A-10): if {@code holders} is a {@link HolderRegistry} it is installed on
      * {@code nodeMessages} (idempotent) and used as publisher; otherwise a new {@code HolderRegistry} on {@code nodes}
@@ -164,16 +165,30 @@ public final class AgoraServer {
     /**
      * Wires everything that hangs off the presence (call before the server starts, once per service): the presence
      * handlers on {@code nodeMessages} and {@code ClaimPresence} (A-11), the {@link DeliveryRouter} for
-     * {@code SendDelivery} and the {@link LocateService} for {@code Locate}/{@code LocationReply} (A-12, R5).
+     * {@code SendDelivery}, the {@link LocateService} for {@code Locate}/{@code LocationReply} (A-12, R5) and the
+     * {@link TeleportService} for {@code Teleport} with the default time limits.
      */
     public static void wirePresence(
             AgoraService service, PresenceService presence, NodeRegistry nodes, NodeMessageDispatcher nodeMessages) {
+        wirePresence(service, presence, nodes, nodeMessages, AgoraConfig.TeleportTimeouts.DEFAULT);
+    }
+
+    /** As above, the {@link TeleportService} with the time limits {@code teleport}. */
+    public static void wirePresence(
+            AgoraService service,
+            PresenceService presence,
+            NodeRegistry nodes,
+            NodeMessageDispatcher nodeMessages,
+            AgoraConfig.TeleportTimeouts teleport) {
         presence.install(nodeMessages);
         PresenceEndpoints.register(service, presence, nodes);
         new DeliveryRouter(nodes, presence).install(nodeMessages);
         LocateService locate = new LocateService(nodes, presence);
         locate.install(nodeMessages);
         locate.register(service);
+        TeleportService teleports = new TeleportService(nodes, presence, teleport);
+        teleports.install(nodeMessages);
+        teleports.register(service);
     }
 
     /** As above; {@code changes} receives every committed write after its commit (A-10 routes it to the holders). */

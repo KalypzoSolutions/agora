@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import de.kalypzo.agora.auth.AuthInterceptor;
 import de.kalypzo.agora.auth.NodeTokens;
+import de.kalypzo.agora.config.AgoraConfig;
 import de.kalypzo.agora.delivery.DeliveryRouter;
 import de.kalypzo.agora.grpc.NodeStream;
 import de.kalypzo.agora.grpc.PresenceEndpoints;
@@ -21,6 +22,7 @@ import de.kalypzo.agora.proto.v1.NodeMessage;
 import de.kalypzo.agora.proto.v1.PresenceEntry;
 import de.kalypzo.agora.proto.v1.ServiceMessage;
 import de.kalypzo.agora.service.AgoraService;
+import de.kalypzo.agora.teleport.TeleportService;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.Server;
@@ -48,7 +50,7 @@ import java.util.function.Predicate;
 
 /**
  * In-process Agora without Postgres for the stream-based cards (A-12): node registry, dispatcher, presence, the
- * delivery router and the locate service, behind the real auth interceptor and {@code Connect} stream.
+ * delivery router, the locate and the teleport service, behind the real auth interceptor and {@code Connect} stream.
  */
 public final class InProcessAgora implements AutoCloseable {
 
@@ -59,6 +61,7 @@ public final class InProcessAgora implements AutoCloseable {
     public final NodeMessageDispatcher dispatcher = new NodeMessageDispatcher();
     public final PresenceService presence;
     public final LocateService locate;
+    public final TeleportService teleport;
     private final ExecutorService lanes = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, CompletableFuture<Void>> markers = new ConcurrentHashMap<>();
@@ -67,6 +70,11 @@ public final class InProcessAgora implements AutoCloseable {
     public final ManagedChannel channel;
 
     public InProcessAgora(Path dir, Duration locateTimeout) throws Exception {
+        this(dir, locateTimeout, AgoraConfig.TeleportTimeouts.DEFAULT);
+    }
+
+    public InProcessAgora(Path dir, Duration locateTimeout, AgoraConfig.TeleportTimeouts teleportTimeouts)
+            throws Exception {
         Path tokens = dir.resolve("tokens");
         StringBuilder sb = new StringBuilder();
         TOKENS.forEach((n, t) -> sb.append(n).append('=').append(t).append('\n'));
@@ -80,6 +88,9 @@ public final class InProcessAgora implements AutoCloseable {
         locate = new LocateService(registry, presence, locateTimeout);
         locate.install(dispatcher);
         locate.register(service);
+        teleport = new TeleportService(registry, presence, teleportTimeouts);
+        teleport.install(dispatcher);
+        teleport.register(service);
         // Registered last: sees a marker only after every earlier message of the node was handled.
         dispatcher.addListener(new NodeMessageListener() {
             @Override
