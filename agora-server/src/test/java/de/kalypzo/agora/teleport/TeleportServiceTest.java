@@ -15,6 +15,7 @@ import de.kalypzo.agora.proto.v1.NetworkLocation;
 import de.kalypzo.agora.proto.v1.NodeKind;
 import de.kalypzo.agora.proto.v1.NodeMessage;
 import de.kalypzo.agora.proto.v1.PlayerArrived;
+import de.kalypzo.agora.proto.v1.PlayerLeft;
 import de.kalypzo.agora.proto.v1.PrepareArrival;
 import de.kalypzo.agora.proto.v1.PresenceEntry;
 import de.kalypzo.agora.proto.v1.ServiceMessage;
@@ -28,14 +29,22 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-/** T-3: the basic network teleport flow (PrepareArrival, ConnectPlayer, PlayerArrived) and its time limits. */
+/**
+ * T-3: the basic network teleport flow (PrepareArrival, ConnectPlayer, PlayerArrived) and its time limits. T-4:
+ * superseding, waiting for an open ConnectPlayer, node loss, presence removal, the total limit and concurrency.
+ */
 class TeleportServiceTest {
 
     static final String STEVE = "00000000-0000-0000-0000-000000000001";
@@ -43,8 +52,12 @@ class TeleportServiceTest {
     static final NetworkLocation WHERE2 = NetworkLocation.newBuilder().setServer("lobby-02").setWorld("world")
             .setX(1.5).setY(64).setZ(-3).setYaw(90).setPitch(10).build();
     static final NetworkLocation WHERE1 = WHERE2.toBuilder().setServer("lobby-01").build();
+    static final NetworkLocation WHERE3 = WHERE2.toBuilder().setX(7).build();
     static final TeleportTimeouts FAST = new TeleportTimeouts(
             Duration.ofMillis(300), Duration.ofMillis(800), Duration.ofMillis(1200), Duration.ofSeconds(3));
+    /** No timer fires while a test checks what is (not) sent during the wait for an open ConnectPlayer. */
+    static final TeleportTimeouts LONG = new TeleportTimeouts(
+            Duration.ofSeconds(2), Duration.ofSeconds(3), Duration.ofSeconds(3), Duration.ofSeconds(4));
 
     @TempDir Path dir;
     InProcessAgora agora;
@@ -205,7 +218,7 @@ class TeleportServiceTest {
     void offlineIsNotOnline() throws Exception {
         start();
         assertThat(status(teleport(ALEX, "lobby-02", WHERE2))).isEqualTo(TeleportStatus.NOT_ONLINE);
-        noPrepareBeforeNext(STEVE);
+        noPrepareBeforeNext(lobby2, "lobby-02", STEVE);
     }
 
     @Test
@@ -213,7 +226,7 @@ class TeleportServiceTest {
         start(entry(STEVE, ""));
         agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-01"));
         assertThat(status(teleport(STEVE, "lobby-02", WHERE2))).isEqualTo(TeleportStatus.NOT_ONLINE);
-        noPrepareBeforeNext(ALEX);
+        noPrepareBeforeNext(lobby2, "lobby-02", ALEX);
     }
 
     @Test
@@ -311,12 +324,196 @@ class TeleportServiceTest {
         assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
     }
 
+    @Test
+    void newerTeleportSupersedes() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-02"));
+        CompletableFuture<TeleportResponse> t1 = teleport(STEVE, "lobby-02", WHERE2);
+        String id1 = readyAndConnect();
+        CompletableFuture<TeleportStatus> t2 = direct(STEVE, "lobby-01", WHERE1);
+        assertThat(status(t1)).isEqualTo(TeleportStatus.SUPERSEDED);
+        assertThat(cancelAt(lobby2).getRequestId()).isEqualTo(id1);
+        agora.processed(proxy);
+        // T2 waits for the ConnectResult of T1: no PrepareArrival at lobby-01 yet.
+        noPrepareBeforeNext(lobby1, "lobby-01", ALEX);
+
+        connectResult(id1, ConnectStatus.CONNECTED);
+        PrepareArrival p2 = prepareAt(lobby1);
+        assertThat(p2.getPlayer()).isEqualTo(STEVE);
+        assertThat(p2.getLocation()).isEqualTo(WHERE1);
+        prepared(lobby1, p2.getRequestId(), ArrivalStatus.READY);
+        ConnectPlayer c2 = proxy.nextMatching(ServiceMessage::hasConnectPlayer).getConnectPlayer();
+        assertThat(c2.getRequestId()).isEqualTo(p2.getRequestId());
+        assertThat(c2.getServer()).isEqualTo("lobby-01");
+        connectResult(p2.getRequestId(), ConnectStatus.CONNECTED);
+        arrived(lobby1, p2.getRequestId());
+        assertThat(t2.get(5, TimeUnit.SECONDS)).isEqualTo(TeleportStatus.OK);
+    }
+
+    @Test
+    void openConnectAfterOkBlocksNext() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-01"));
+        CompletableFuture<TeleportResponse> t1 = teleport(STEVE, "lobby-02", WHERE2);
+        String id1 = readyAndConnect();
+        arrived(lobby2, id1);
+        assertThat(status(t1)).isEqualTo(TeleportStatus.OK);
+
+        CompletableFuture<TeleportStatus> t2 = direct(STEVE, "lobby-02", WHERE3);
+        noPrepareBeforeNext(lobby2, "lobby-02", ALEX);
+        connectResult(id1, ConnectStatus.CONNECTED);
+        PrepareArrival p2 = prepareAt(lobby2);
+        assertThat(p2.getPlayer()).isEqualTo(STEVE);
+        assertThat(p2.getLocation()).isEqualTo(WHERE3);
+        assertThat(t2).isNotDone();
+    }
+
+    @Test
+    void openConnectExpires() throws Exception {
+        start();
+        CompletableFuture<TeleportResponse> t1 = teleport(STEVE, "lobby-02", WHERE2);
+        String id1 = prepareAt(lobby2).getRequestId();
+        long ready = System.nanoTime();
+        prepared(lobby2, id1, ArrivalStatus.READY);
+        proxy.nextMatching(ServiceMessage::hasConnectPlayer);
+        arrived(lobby2, id1);
+        assertThat(status(t1)).isEqualTo(TeleportStatus.OK);
+
+        direct(STEVE, "lobby-02", WHERE3);
+        PrepareArrival p2 = prepareAt(lobby2);
+        assertThat(p2.getLocation()).isEqualTo(WHERE3);
+        // The open ConnectPlayer of T1 expired after the connect limit (800 ms).
+        assertThat(Duration.ofNanos(System.nanoTime() - ready))
+                .isBetween(Duration.ofMillis(700), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void thirdTeleportWhileWaiting() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-02"));
+        CompletableFuture<TeleportResponse> t1 = teleport(STEVE, "lobby-02", WHERE2);
+        String id1 = readyAndConnect();
+        CompletableFuture<TeleportStatus> t2 = direct(STEVE, "lobby-01", WHERE1);
+        assertThat(status(t1)).isEqualTo(TeleportStatus.SUPERSEDED);
+        assertThat(cancelAt(lobby2).getRequestId()).isEqualTo(id1);
+        CompletableFuture<TeleportStatus> t3 = direct(STEVE, "lobby-02", WHERE3);
+        assertThat(t2.get(5, TimeUnit.SECONDS)).isEqualTo(TeleportStatus.SUPERSEDED);
+
+        connectResult(id1, ConnectStatus.CONNECTED);
+        PrepareArrival p3 = prepareAt(lobby2);
+        assertThat(p3.getPlayer()).isEqualTo(STEVE);
+        assertThat(p3.getLocation()).isEqualTo(WHERE3);
+        assertThat(t3).isNotDone();
+        // T2 sent neither a PrepareArrival nor a CancelArrival to lobby-01.
+        noPrepareBeforeNext(lobby1, "lobby-01", ALEX);
+    }
+
+    @Test
+    void targetGoneIsUnavailable() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
+        prepareAt(lobby2);
+        lobby2.cancel();
+        assertThat(status(f)).isEqualTo(TeleportStatus.SERVER_UNAVAILABLE);
+    }
+
+    @Test
+    void proxyGoneIsNotOnline() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-01"));
+        CompletableFuture<TeleportResponse> t1 = teleport(STEVE, "lobby-02", WHERE2);
+        readyAndConnect();
+        proxy.cancel();
+        assertThat(status(t1)).isEqualTo(TeleportStatus.NOT_ONLINE);
+
+        // The open ConnectPlayer went with the proxy: the next teleport starts at once (FIFO before ALEX's).
+        proxy = agora.connect("proxy-01", NodeKind.VELOCITY, entry(STEVE, "lobby-01"));
+        direct(STEVE, "lobby-02", WHERE3);
+        teleport(ALEX, "lobby-02", null);
+        PrepareArrival p2 = prepareAt(lobby2);
+        assertThat(p2.getPlayer()).isEqualTo(STEVE);
+        assertThat(p2.getLocation()).isEqualTo(WHERE3);
+    }
+
+    @Test
+    void presenceRemovedIsNotOnline() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
+        String id = readyAndConnect();
+        left(STEVE);
+        assertThat(status(f)).isEqualTo(TeleportStatus.NOT_ONLINE);
+        assertThat(cancelAt(lobby2).getRequestId()).isEqualTo(id);
+    }
+
+    @Test
+    void presenceRemovedWhileWaiting() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        CompletableFuture<TeleportResponse> t1 = teleport(STEVE, "lobby-02", WHERE2);
+        readyAndConnect();
+        CompletableFuture<TeleportStatus> t2 = direct(STEVE, "lobby-01", WHERE1);
+        assertThat(status(t1)).isEqualTo(TeleportStatus.SUPERSEDED);
+        left(STEVE);
+        assertThat(t2.get(5, TimeUnit.SECONDS)).isEqualTo(TeleportStatus.NOT_ONLINE);
+    }
+
+    @Test
+    void totalTimeout() throws Exception {
+        start(entry(STEVE, "lobby-01"), new TeleportTimeouts(
+                Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofMillis(500)));
+        long t0 = System.nanoTime();
+        CompletableFuture<TeleportResponse> f = teleport(STEVE, "lobby-02", WHERE2);
+        prepareAt(lobby2);
+        assertThat(status(f)).isEqualTo(TeleportStatus.TIMEOUT);
+        assertThat(Duration.ofNanos(System.nanoTime() - t0))
+                .isBetween(Duration.ofMillis(400), Duration.ofMillis(900));
+    }
+
+    @Test
+    void concurrentConnectResultAndArrival() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        ExecutorService two = Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < 100; i++) {
+                CompletableFuture<TeleportStatus> f = direct(STEVE, "lobby-02", WHERE2);
+                // FIFO: a CancelArrival of the previous round would come before this PrepareArrival.
+                ServiceMessage m = lobby2.nextMatching(x -> x.hasCancelArrival() || x.hasPrepareArrival());
+                assertThat(m.hasPrepareArrival()).isTrue();
+                String id = m.getPrepareArrival().getRequestId();
+                prepared(lobby2, id, ArrivalStatus.READY);
+                assertThat(proxy.nextMatching(ServiceMessage::hasConnectPlayer).getConnectPlayer().getRequestId())
+                        .isEqualTo(id);
+                CountDownLatch go = new CountDownLatch(1);
+                Future<?> a = two.submit(() -> {
+                    go.await();
+                    connectResult(id, ConnectStatus.CONNECTED);
+                    return null;
+                });
+                Future<?> b = two.submit(() -> {
+                    go.await();
+                    arrived(lobby2, id);
+                    return null;
+                });
+                go.countDown();
+                a.get(5, TimeUnit.SECONDS);
+                b.get(5, TimeUnit.SECONDS);
+                assertThat(f.get(5, TimeUnit.SECONDS)).as("round %d", i).isEqualTo(TeleportStatus.OK);
+            }
+        } finally {
+            two.shutdownNow();
+        }
+        noCancelBeforeNextPrepare();
+    }
+
     void start() throws Exception {
         start(entry(STEVE, "lobby-01"));
     }
 
     void start(PresenceEntry steve) throws Exception {
-        agora = new InProcessAgora(dir, Duration.ofSeconds(3), FAST);
+        start(steve, FAST);
+    }
+
+    void start(PresenceEntry steve, TeleportTimeouts timeouts) throws Exception {
+        agora = new InProcessAgora(dir, Duration.ofSeconds(3), timeouts);
         proxy = agora.connect("proxy-01", NodeKind.VELOCITY, steve);
         lobby1 = agora.connect("lobby-01", NodeKind.PAPER);
         lobby2 = agora.connect("lobby-02", NodeKind.PAPER);
@@ -341,10 +538,15 @@ class TeleportServiceTest {
                 .isTrue();
     }
 
-    /** FIFO barrier on lobby-02: the next PrepareArrival is the one of a new teleport of {@code barrier}. */
-    void noPrepareBeforeNext(String barrier) throws Exception {
-        teleport(barrier, "lobby-02", WHERE2);
-        assertThat(prepareAt(lobby2).getPlayer()).isEqualTo(barrier);
+    /**
+     * FIFO barrier on {@code at} (node {@code server}): the next PrepareArrival or CancelArrival is the PrepareArrival
+     * of a new teleport of {@code barrier}.
+     */
+    void noPrepareBeforeNext(Client at, String server, String barrier) throws Exception {
+        teleport(barrier, server, null);
+        ServiceMessage m = at.nextMatching(x -> x.hasPrepareArrival() || x.hasCancelArrival());
+        assertThat(m.hasPrepareArrival()).isTrue();
+        assertThat(m.getPrepareArrival().getPlayer()).isEqualTo(barrier);
     }
 
     /**
@@ -380,6 +582,15 @@ class TeleportServiceTest {
     void connectResult(String id, ConnectStatus s) {
         proxy.send(NodeMessage.newBuilder().setConnectResult(ConnectResult.newBuilder().setRequestId(id).setStatus(s))
                 .build());
+    }
+
+    void left(String player) {
+        proxy.send(NodeMessage.newBuilder().setPlayerLeft(PlayerLeft.newBuilder().setPlayer(player)).build());
+    }
+
+    /** Calls the service directly: when it returns, the transition and its sends have run. */
+    CompletableFuture<TeleportStatus> direct(String player, String server, NetworkLocation location) {
+        return agora.teleport.teleport(UUID.fromString(player), server, location);
     }
 
     static PresenceEntry entry(String player, String server) {

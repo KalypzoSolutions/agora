@@ -9,6 +9,7 @@ import de.kalypzo.agora.node.NodeSession;
 import de.kalypzo.agora.node.Subscription;
 import de.kalypzo.agora.presence.PresenceEvents;
 import de.kalypzo.agora.presence.PresenceService;
+import de.kalypzo.agora.presence.RemovalReason;
 import de.kalypzo.agora.proto.v1.ArrivalFailed;
 import de.kalypzo.agora.proto.v1.ArrivalPrepared;
 import de.kalypzo.agora.proto.v1.CancelArrival;
@@ -45,9 +46,11 @@ import org.slf4j.LoggerFactory;
  * <p>State per player (a slot): the running teleport ({@code current}) and the last {@code ConnectPlayer} that has no
  * {@code ConnectResult} yet ({@code openConnect}). Every transition of a player runs under the lock of its slot and
  * only changes state; sends and the completion of result futures are collected and run after the lock is released.
- * Answers are accepted only from the session that was asked, while it is not superseded. Timers run on the common
- * pool and do nothing once their flow has ended or moved to another phase. Register with {@link #install} (before the
- * server starts) and {@link #register}.
+ * A new teleport supersedes the running one and starts only once no {@code ConnectPlayer} of the player is open
+ * (until then it waits). Answers are accepted only from the session that was asked, while it is not superseded. A
+ * gone target ends the teleport with {@code SERVER_UNAVAILABLE}, a gone proxy or a removed presence entry with
+ * {@code NOT_ONLINE}. Timers run on the common pool and do nothing once their flow has ended or moved to another
+ * phase. Register with {@link #install} (before the server starts) and {@link #register}.
  */
 public final class TeleportService implements NodeMessageListener, PresenceEvents {
 
@@ -96,10 +99,18 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
         this.timeouts = timeouts;
     }
 
-    /** Subscribes to the teleport answers of the nodes and to the presence events. Call before the server starts. */
+    /**
+     * Subscribes to the teleport answers of the nodes, to node-gone and to the presence events. Call before the server
+     * starts.
+     */
     public Subscription install(NodeMessageDispatcher dispatcher) {
         presence.addEvents(this);
-        return dispatcher.addListener(this);
+        Subscription answers = dispatcher.addListener(this);
+        Subscription gone = nodes.onNodeGone(this::nodeGone);
+        return () -> {
+            answers.cancel();
+            gone.cancel();
+        };
     }
 
     /**
@@ -156,8 +167,8 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
 
     /**
      * Teleports {@code player} to {@code server}, to {@code location} there, or only connects it when
-     * {@code location} is {@code null}. A running teleport of the player ends with {@code SUPERSEDED}. The future
-     * always completes normally.
+     * {@code location} is {@code null}. A running teleport of the player ends with {@code SUPERSEDED}; while a
+     * {@code ConnectPlayer} of the player is open, this one waits for it. The future always completes normally.
      */
     public CompletableFuture<TeleportStatus> teleport(UUID player, String server, NetworkLocation location) {
         Objects.requireNonNull(player, "player");
@@ -169,7 +180,7 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
             after(timeouts.total(), player, (s, a) -> {
                 if (!flow.done) finish(s, flow, TeleportStatus.TIMEOUT, a);
             });
-            start(slot, flow, actions);
+            if (slot.openConnect == null) start(slot, flow, actions); // else WAITING until it is cleared (AR-8)
         });
         return flow.result;
     }
@@ -180,8 +191,7 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
                 (slot, flow, actions) -> {
                     switch (prepared.getStatus()) {
                         case READY -> {
-                            flow.phase = Phase.CONNECTING;
-                            if (slot.openConnect != null) clearOpenConnect(slot, slot.openConnect.requestId());
+                            flow.phase = Phase.CONNECTING; // AR-2: no other ConnectPlayer of the player is open here
                             OpenConnect open = new OpenConnect(flow.requestId, flow.proxy);
                             slot.openConnect = open;
                             NodeSession proxy = flow.proxy;
@@ -191,7 +201,7 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
                             actions.add(() -> proxy.send(connect));
                             // The open ConnectPlayer expires as long after its sending as the ConnectResult may take.
                             after(timeouts.connect(), flow.player, (s, a) -> {
-                                if (s.openConnect == open) clearOpenConnect(s, open.requestId());
+                                if (s.openConnect == open) clearOpenConnect(s, a);
                             });
                             after(timeouts.connect(), flow.player, (s, a) -> {
                                 if (!flow.done && flow.phase == Phase.CONNECTING && !flow.connectAnswered) {
@@ -236,7 +246,7 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
             // Always clears the open ConnectPlayer, even of an ended teleport.
             if (slot.openConnect != null && slot.openConnect.requestId().equals(id)
                     && slot.openConnect.proxy() == session) {
-                clearOpenConnect(slot, id);
+                clearOpenConnect(slot, actions);
             }
             if (flow.done || flow.proxy != session || flow.phase != Phase.CONNECTING || flow.connectAnswered) {
                 LOG.debug("ConnectResult '{}' from '{}' is late or unexpected", id, session.nodeId());
@@ -248,6 +258,29 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
                 default -> finish(slot, flow, TeleportStatus.CONNECT_FAILED, actions);
             }
         });
+    }
+
+    /** AR-11: the player left the network (or the entry was displaced); its teleport cannot reach it. */
+    @Override
+    public void removed(PresenceEntry entry, RemovalReason reason) {
+        transition(UUID.fromString(entry.getPlayer()), false, (slot, actions) -> {
+            if (slot.current != null) finish(slot, slot.current, TeleportStatus.NOT_ONLINE, actions);
+        });
+    }
+
+    /** AR-10: a gone target ends its teleport (no cancel, it is closed); a gone proxy takes its player with it. */
+    private void nodeGone(NodeSession session) {
+        for (UUID player : slots.keySet()) {
+            transition(player, false, (slot, actions) -> {
+                Flow flow = slot.current;
+                if (flow != null && flow.target == session) {
+                    finish(slot, flow, TeleportStatus.SERVER_UNAVAILABLE, actions);
+                } else if (flow != null && flow.proxy == session) {
+                    finish(slot, flow, TeleportStatus.NOT_ONLINE, actions);
+                }
+                if (slot.openConnect != null && slot.openConnect.proxy() == session) clearOpenConnect(slot, actions);
+            });
+        }
     }
 
     private interface Answer {
@@ -329,10 +362,13 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
         });
     }
 
-    private void clearOpenConnect(Slot slot, String requestId) {
+    /** AR-8: clears the open ConnectPlayer; a waiting teleport starts now. */
+    private void clearOpenConnect(Slot slot, List<Runnable> actions) {
+        String requestId = slot.openConnect.requestId();
         slot.openConnect = null;
         Flow flow = flows.get(requestId);
         if (flow != null && flow.done) flows.remove(requestId);
+        if (slot.current != null && slot.current.phase == Phase.WAITING) start(slot, slot.current, actions);
     }
 
     /** Runs {@code step} on the player's slot after {@code delay}, on the common pool. */
@@ -363,6 +399,12 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
             }
             break;
         }
-        actions.forEach(Runnable::run);
+        for (Runnable action : actions) {
+            try {
+                action.run();
+            } catch (RuntimeException e) {
+                LOG.error("Teleport action for {} failed", player, e); // the other actions (e.g. a complete) still run
+            }
+        }
     }
 }
