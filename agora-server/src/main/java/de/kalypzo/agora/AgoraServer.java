@@ -166,8 +166,14 @@ public final class AgoraServer {
      * Wires everything that hangs off the presence (call before the server starts, once per service): the presence
      * handlers on {@code nodeMessages} and {@code ClaimPresence} (A-11), the {@link DeliveryRouter} for
      * {@code SendDelivery}, the {@link LocateService} for {@code Locate}/{@code LocationReply} (A-12, R5) and the
-     * {@link TeleportService} for {@code Teleport} with the time limits {@code teleport}.
+     * {@link TeleportService} for {@code Teleport} with the default time limits.
      */
+    public static void wirePresence(
+            AgoraService service, PresenceService presence, NodeRegistry nodes, NodeMessageDispatcher nodeMessages) {
+        wirePresence(service, presence, nodes, nodeMessages, AgoraConfig.TeleportTimeouts.DEFAULT);
+    }
+
+    /** As above, the {@link TeleportService} with the time limits {@code teleport}. */
     public static void wirePresence(
             AgoraService service,
             PresenceService presence,

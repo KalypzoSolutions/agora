@@ -3,6 +3,7 @@ package de.kalypzo.agora.config;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
+import org.slf4j.LoggerFactory;
 
 /**
  * Server configuration. Can be built from the environment ({@link #fromEnv}) or directly, e.g. by in-process tests.
@@ -62,7 +63,7 @@ public record AgoraConfig(
     }
 
     public static AgoraConfig fromEnv(Map<String, String> env) {
-        return new AgoraConfig(
+        AgoraConfig config = new AgoraConfig(
                 intVar(env, "AGORA_PORT", DEFAULT_PORT),
                 required(env, "AGORA_DB_URL"),
                 required(env, "AGORA_DB_USER"),
@@ -75,6 +76,15 @@ public record AgoraConfig(
                         ms(env, "AGORA_TELEPORT_CONNECT_MS", TeleportTimeouts.DEFAULT.connect()),
                         ms(env, "AGORA_TELEPORT_ARRIVAL_MS", TeleportTimeouts.DEFAULT.arrival()),
                         ms(env, "AGORA_TELEPORT_TOTAL_MS", TeleportTimeouts.DEFAULT.total())));
+        TeleportTimeouts t = config.teleport();
+        // Pantheon fixes both in code: the noted arrival on Paper lives 35 s, the client waits 40 s for Teleport.
+        if (t.prepare().plus(t.arrival()).compareTo(Duration.ofSeconds(35)) >= 0
+                || t.total().compareTo(Duration.ofSeconds(40)) >= 0) {
+            LoggerFactory.getLogger(AgoraConfig.class).warn("Teleport limits prepare+arrival={} / total={} reach "
+                    + "Pantheon's fixed limits (noted arrival on Paper 35 s, client deadline 40 s): keep "
+                    + "prepare+arrival below 35 s and total below 40 s", t.prepare().plus(t.arrival()), t.total());
+        }
+        return config;
     }
 
     private static String required(Map<String, String> env, String name) {
