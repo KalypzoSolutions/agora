@@ -1,10 +1,14 @@
 package de.kalypzo.agora.node;
 
+import de.kalypzo.agora.proto.v1.ArrivalFailed;
+import de.kalypzo.agora.proto.v1.ArrivalPrepared;
 import de.kalypzo.agora.proto.v1.Barrier;
+import de.kalypzo.agora.proto.v1.ConnectResult;
 import de.kalypzo.agora.proto.v1.Heartbeat;
 import de.kalypzo.agora.proto.v1.Hello;
 import de.kalypzo.agora.proto.v1.KickResult;
 import de.kalypzo.agora.proto.v1.LocationReply;
+import de.kalypzo.agora.proto.v1.PlayerArrived;
 import de.kalypzo.agora.proto.v1.PlayerLeft;
 import de.kalypzo.agora.proto.v1.PlayerSwitched;
 import de.kalypzo.agora.proto.v1.ReleasePlayer;
@@ -42,4 +46,12 @@ public interface NodeMessageListener {
     default void onReleasePlayer(NodeSession session, ReleasePlayer release) {}
 
     default void onBarrier(NodeSession session, Barrier barrier) {}
+
+    default void onArrivalPrepared(NodeSession session, ArrivalPrepared prepared) {}
+
+    default void onPlayerArrived(NodeSession session, PlayerArrived arrived) {}
+
+    default void onArrivalFailed(NodeSession session, ArrivalFailed failed) {}
+
+    default void onConnectResult(NodeSession session, ConnectResult result) {}
 }
