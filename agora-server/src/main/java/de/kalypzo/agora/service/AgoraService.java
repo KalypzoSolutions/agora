@@ -14,6 +14,7 @@ public final class AgoraService extends AgoraGrpc.AgoraImplBase {
     private volatile ConnectHandler connect;
     private volatile RpcHandler<ClaimPresenceRequest, ClaimPresenceResponse> claimPresence;
     private volatile RpcHandler<LocateRequest, LocateResponse> locate;
+    private volatile RpcHandler<TeleportRequest, TeleportResponse> teleport;
     private volatile RpcHandler<LoadPlayerRequest, LoadPlayerResponse> loadPlayer;
     private volatile RpcHandler<LoadRequest, LoadResponse> load;
     private volatile RpcHandler<QueryRequest, QueryResponse> query;
@@ -61,6 +62,18 @@ public final class AgoraService extends AgoraGrpc.AgoraImplBase {
         RpcHandler<LocateRequest, LocateResponse> h = locate;
         if (h != null) h.handle(request, out);
         else super.locate(request, out);
+    }
+
+    public AgoraService onTeleport(RpcHandler<TeleportRequest, TeleportResponse> handler) {
+        this.teleport = handler;
+        return this;
+    }
+
+    @Override
+    public void teleport(TeleportRequest request, StreamObserver<TeleportResponse> out) {
+        RpcHandler<TeleportRequest, TeleportResponse> h = teleport;
+        if (h != null) h.handle(request, out);
+        else super.teleport(request, out);
     }
 
     public AgoraService onLoadPlayer(RpcHandler<LoadPlayerRequest, LoadPlayerResponse> handler) {

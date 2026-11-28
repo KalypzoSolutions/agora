@@ -20,6 +20,7 @@ service Agora {
   rpc DeclareIndex  (DeclareIndexRequest)  returns (DeclareIndexResponse);
   rpc AppendAudit   (AuditBundle)          returns (AppendAuditResponse);
   rpc Timeline      (TimelineRequest)      returns (TimelineResponse);
+  rpc Teleport      (TeleportRequest)      returns (TeleportResponse);
 }
 
 // ---------- Werte ----------
@@ -146,6 +147,10 @@ message NodeMessage {
     SendDelivery send_delivery = 9;
     ReleasePlayer release_player = 10;
     Barrier barrier = 11;                                                           // R45
+    ArrivalPrepared arrival_prepared = 12;                                          // nur von PAPER
+    PlayerArrived player_arrived = 13;                                              // nur von PAPER
+    ArrivalFailed arrival_failed = 14;                                              // nur von PAPER
+    ConnectResult connect_result = 15;                                              // nur von VELOCITY
   }
 }
 message ServiceMessage {
@@ -157,6 +162,9 @@ message ServiceMessage {
     LocationRequest location_request = 5;
     KickPlayer kick_player = 6;
     BarrierAck barrier_ack = 7;                                                     // R45
+    PrepareArrival prepare_arrival = 8;                                             // nur an PAPER
+    CancelArrival cancel_arrival = 9;                                               // nur an PAPER
+    ConnectPlayer connect_player = 10;                                              // nur an VELOCITY
   }
 }
 message Hello { string node_id = 1; NodeKind kind = 2; repeated string held_players = 3;
@@ -180,6 +188,24 @@ message Welcome      { repeated PresenceEntry presence = 1; }
 message PresenceChanged { oneof change { PresenceEntry upsert = 1; string removed = 2; } }
 message DocChanged { RowRef ref = 1; int64 version = 2; bool deleted = 3;
                      map<string, Value> data = 4; string idempotency_key = 5; }       // E4
+
+// ---------- Teleport ----------
+message TeleportRequest  { string player = 1; string server = 2; NetworkLocation location = 3; } // location fehlt = connect
+enum TeleportStatus {
+  TELEPORT_STATUS_UNSPECIFIED = 0; OK = 1; NOT_ONLINE = 2; SERVER_UNAVAILABLE = 3; WORLD_NOT_FOUND = 4;
+  CONNECT_FAILED = 5; SUPERSEDED = 6; TIMEOUT = 7;
+}
+message TeleportResponse { TeleportStatus status = 1; }
+message PrepareArrival  { string request_id = 1; string player = 2; NetworkLocation location = 3; }
+message CancelArrival   { string request_id = 1; string player = 2; }
+// Enum-Werte gelten in proto3 im ganzen Package: WORLD_NOT_FOUND steht schon in TeleportStatus, daher der Präfix.
+enum ArrivalStatus { ARRIVAL_STATUS_UNSPECIFIED = 0; READY = 1; ARRIVAL_WORLD_NOT_FOUND = 2; ALREADY_HERE = 3; }
+message ArrivalPrepared { string request_id = 1; ArrivalStatus status = 2; }
+message PlayerArrived   { string request_id = 1; }
+message ArrivalFailed   { string request_id = 1; }
+message ConnectPlayer   { string request_id = 1; string player = 2; string server = 3; }
+enum ConnectStatus { CONNECT_STATUS_UNSPECIFIED = 0; CONNECTED = 1; ALREADY_CONNECTED = 2; FAILED = 3; PLAYER_NOT_FOUND = 4; }
+message ConnectResult   { string request_id = 1; ConnectStatus status = 2; }
 
 // ---------- Audit (audit_log.md §8, E28: UUIDs als bytes, 16 Byte Big Endian) ----------
 message AuditBundle {

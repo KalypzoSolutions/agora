@@ -44,7 +44,7 @@ class SessionAuditWiringTest {
             NodeRegistry nodes = new NodeRegistry();
             NodeMessageDispatcher dispatcher = new NodeMessageDispatcher();
             PresenceService presence = new PresenceService(nodes);
-            AgoraServer.wirePresence(service, presence, nodes, dispatcher);
+            AgoraServer.wirePresence(service, presence, nodes, dispatcher, AgoraConfig.TeleportTimeouts.DEFAULT);
             AgoraServer server = AgoraServer.start(new AgoraConfig(
                     0, pg.getJdbcUrl(), pg.getUsername(), pg.getPassword(), 4, tokens, Duration.ZERO),
                     service, new HolderRegistry(nodes), nodes, dispatcher, presence);
