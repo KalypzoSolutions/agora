@@ -408,6 +408,25 @@ class TeleportServiceTest {
         noPrepareBeforeNext(lobby1, "lobby-01", ALEX);
     }
 
+    /** A teleport that ended before its PrepareArrival went out sends none (it would come after its own Cancel). */
+    @Test
+    void endedBeforeSendSendsNoPrepare() throws Exception {
+        start(entry(STEVE, "lobby-01"), LONG);
+        agora.connect("proxy-02", NodeKind.VELOCITY, entry(ALEX, "lobby-01"));
+        CompletableFuture<TeleportStatus> t1 = direct(STEVE, "lobby-02", WHERE2);
+        String id1 = prepareAt(lobby2).getRequestId();
+        // T1 completes among the actions of T2's transition, before T2's PrepareArrival; T3 then supersedes T2.
+        t1.thenRun(() -> direct(STEVE, "lobby-02", WHERE3));
+        CompletableFuture<TeleportStatus> t2 = direct(STEVE, "lobby-02", WHERE2.toBuilder().setX(5).build());
+        assertThat(t2.get(5, TimeUnit.SECONDS)).isEqualTo(TeleportStatus.SUPERSEDED);
+
+        Predicate<ServiceMessage> arrival = m -> m.hasPrepareArrival() || m.hasCancelArrival();
+        assertThat(lobby2.nextMatching(arrival).getCancelArrival().getRequestId()).isEqualTo(id1);
+        assertThat(lobby2.nextMatching(arrival).hasCancelArrival()).isTrue(); // T2's
+        assertThat(lobby2.nextMatching(arrival).getPrepareArrival().getLocation()).isEqualTo(WHERE3);
+        noPrepareBeforeNext(lobby2, "lobby-02", ALEX);
+    }
+
     @Test
     void targetGoneIsUnavailable() throws Exception {
         start(entry(STEVE, "lobby-01"), LONG);

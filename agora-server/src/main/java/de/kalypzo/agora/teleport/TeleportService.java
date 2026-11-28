@@ -69,7 +69,7 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
         NodeSession proxy;
         boolean prepareSent;
         boolean connectAnswered;
-        boolean done;
+        volatile boolean done; // also read by the PrepareArrival send, outside the lock
 
         Flow(UUID player, String server, NetworkLocation location) {
             this.player = player;
@@ -328,7 +328,10 @@ public final class TeleportService implements NodeMessageListener, PresenceEvent
                 .setRequestId(flow.requestId).setPlayer(flow.player.toString());
         if (flow.location != null) prepare.setLocation(flow.location);
         ServiceMessage message = ServiceMessage.newBuilder().setPrepareArrival(prepare).build();
-        actions.add(() -> target.send(message));
+        actions.add(() -> {
+            // ended in between (e.g. superseded from another action): its Cancel may already be out, so no Prepare
+            if (!flow.done) target.send(message);
+        });
         after(timeouts.prepare(), flow.player, (s, a) -> {
             if (!flow.done && flow.phase == Phase.PREPARING) finish(s, flow, TeleportStatus.TIMEOUT, a);
         });
