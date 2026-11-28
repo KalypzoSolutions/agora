@@ -61,4 +61,25 @@ class AgoraConfigTest {
     void toStringMasksPassword() {
         assertThat(AgoraConfig.fromEnv(base()).toString()).doesNotContain("s3cret-pw").contains("dbUrl");
     }
+
+    @Test
+    void teleportTimeoutsDefault() {
+        AgoraConfig c = AgoraConfig.fromEnv(base());
+        assertThat(c.teleport()).isEqualTo(AgoraConfig.TeleportTimeouts.DEFAULT);
+        assertThat(AgoraConfig.TeleportTimeouts.DEFAULT.total()).isEqualTo(Duration.ofSeconds(38));
+    }
+
+    @Test
+    void teleportTimeoutsFromEnv() {
+        Map<String, String> env = base();
+        env.put("AGORA_TELEPORT_ARRIVAL_MS", "2500");
+        assertThat(AgoraConfig.fromEnv(env).teleport().arrival()).isEqualTo(Duration.ofMillis(2500));
+    }
+
+    @Test
+    void teleportTimeoutRejectsZero() {
+        Map<String, String> env = base();
+        env.put("AGORA_TELEPORT_PREPARE_MS", "0");
+        assertThatThrownBy(() -> AgoraConfig.fromEnv(env)).isInstanceOf(IllegalArgumentException.class);
+    }
 }

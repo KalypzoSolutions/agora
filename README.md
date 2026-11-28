@@ -48,6 +48,10 @@ Ohne Docker: `./gradlew :agora-server:run` mit denselben Variablen. PostgreSQL 1
 | `AGORA_PORT` | `9090` | gRPC-Port (Plaintext) |
 | `AGORA_DB_POOL_SIZE` | `16` | Hikari-Pool |
 | `AGORA_PAPER_WELCOME_DELAY_MS` | `15000` | frühestens so lange nach dem Start bekommen PAPER-Nodes `Welcome` |
+| `AGORA_TELEPORT_PREPARE_MS` | `3000` | längste Wartezeit auf `ArrivalPrepared` beim Teleport |
+| `AGORA_TELEPORT_CONNECT_MS` | `10000` | längste Wartezeit auf `ConnectResult` beim Teleport |
+| `AGORA_TELEPORT_ARRIVAL_MS` | `25000` | längste Wartezeit auf `PlayerArrived` beim Teleport |
+| `AGORA_TELEPORT_TOTAL_MS` | `38000` | längste Gesamtdauer eines Teleports |
 
 ### Tokens-Datei
 
